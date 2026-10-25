@@ -887,14 +887,16 @@ function control(dt) {
   head.position.x = cx; head.position.z = cz;
   updateRack(dt);
   // 下ろしてチェーンがたるんだら、リングの付け根はアームの真下（落ちた位置）に留まる
-  // 引き上げの初め（リングが板から離れて少しの間）も、ゆっくり巻き上げるチェーンは真下に垂れたまま。
-  // 付け根が振り子のように振られないよう、アームの真下へ寄せ続ける
-  const liftPin = game.state === 'lift' && (game.t < 0.8 || ringLowest().p.y - SHELF.topY < 0.6);
-  if ((['descend', 'bottom'].includes(game.state) && head.position.distanceTo(shackle.position) < rope.distance - 0.03) || liftPin) {
+  if (['descend', 'bottom'].includes(game.state) && head.position.distanceTo(shackle.position) < rope.distance - 0.03) {
     // 位置を直接動かすとフックをすり抜けるので、速度で落ちた位置へ寄せる（フックに当たればそこで止まる）
     const k = 8;
     shackle.velocity.x = (head.position.x - shackle.position.x) * k;
     shackle.velocity.z = (head.position.z - shackle.position.z) * k;
+  }
+  // 引き上げの初めは付け根の横揺れだけを抑える（位置は引き戻さない＝フックに掛かったリングを外さない）
+  if (game.state === 'lift' && game.t < 1.2) {
+    const keep = Math.exp(-6 * dt);
+    shackle.velocity.x *= keep; shackle.velocity.z *= keep;
   }
 
   // 実機の微振動。チェーンがたるんで縁で立ったリングは、わずかな揺れでどちらかへ倒れる

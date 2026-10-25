@@ -136,12 +136,15 @@ let viewIdx = 0;
 const ROOF_LAYER = 1;
 camPip.layers.enable(ROOF_LAYER);
 // 画面の縦横比に合わせて、筐体の横幅が収まる距離までカメラを引く（スマホ縦持ち対応）
-function placeCamera(cam, v) {
+function placeCamera(cam, v, halfW = 5.4, near = 3) {
   const look = new THREE.Vector3(...v.look), dir = new THREE.Vector3(...v.pos).sub(look);
   const d0 = dir.length(); dir.normalize();
   const tanH = Math.tan(cam.fov * DEG / 2) * cam.aspect;
-  const dist = Math.max(d0, 5.4 / tanH + 3);   // 手前のガラス面（z=3）基準で横幅 ±5.4 が入る距離
-  if (cam.aspect < 0.8 && !v.noRoof) look.y -= 1.2;   // 縦長画面では下の操作ボタンの分だけ筐体を上へ
+  const dist = Math.max(d0, (cam === camMain && viewRects?.main.y ? halfW - 0.5 : halfW) / tanH + near);   // 手前のガラス面（z=3）基準で横幅 ±5.4 が入る距離
+  // 縦長画面で操作ボタンの上に重ねて描くときは、ボタンの分だけ筐体を上へ
+  if (cam === camMain && !viewRects?.main.y && cam.aspect < 0.8 && !v.noRoof) look.y -= 1.2;
+  // 小窓の上に詰めたメイン画面では、筐体の上端が切れないよう少し上を見る
+  if (cam === camMain && viewRects?.main.y && !v.noRoof) look.y += 0.9;
   cam.position.copy(look).addScaledVector(dir, dist);
   cam.lookAt(look);
 }
@@ -150,7 +153,7 @@ function applyView() {
   placeCamera(camMain, v);
   if (v.noRoof) camMain.layers.disable(ROOF_LAYER); else camMain.layers.enable(ROOF_LAYER);
   const p = VIEWS[viewIdx === 1 ? 0 : 1];
-  camPip.position.set(...p.pos); camPip.lookAt(...p.look);
+  placeCamera(camPip, p, viewIdx === 1 ? 5.4 : 3.4, viewIdx === 1 ? 3 : 4);   // 横からの別視点は奥行き方向（約±3.4）が入ればよい
 }
 
 scene.add(new THREE.HemisphereLight(0xffffff, 0xd8d0e0, 0.5));
@@ -1008,7 +1011,7 @@ function bindSettings() {
   const rnd = $('random'); rnd.checked = settings.random;
   rnd.onchange = () => { settings.random = rnd.checked; saveSettings(); resetRound(); rnd.blur(); };
   const pip = $('pip'); pip.checked = settings.pip; document.body.classList.toggle('pip', settings.pip);
-  pip.onchange = () => { settings.pip = pip.checked; saveSettings(); document.body.classList.toggle('pip', settings.pip); pip.blur(); };
+  pip.onchange = () => { settings.pip = pip.checked; saveSettings(); document.body.classList.toggle('pip', settings.pip); resize(); pip.blur(); };
   for (const key of ['reflect', 'grid']) {
     const el = $(key); el.checked = settings[key];
     el.onchange = () => { settings[key] = el.checked; saveSettings(); applyShelfOptions(); el.blur(); };
@@ -1080,9 +1083,26 @@ function pollInput() {
 }
 
 // ---------------------------------------------------------------- ループ
+// 画面レイアウト: スマホ縦持ちで小窓を出すときは、メイン画面を小窓の上に詰めて重ならないようにする
+//   下から [操作ボタン 150px] [成績 | 横からの小窓] [メイン画面]
+const CTRL_H = 150;
+let viewRects = null;
+function computeLayout() {
+  const W = innerWidth, H = innerHeight, mobile = W <= 700;
+  if (mobile && settings.pip) {
+    // スマホ: メイン画面と横からの別視点を左右に並べ、操作ボタンの上に置く（重ならない）
+    const pw = Math.round(W * 0.38);
+    viewRects = { main: { x: 0, y: CTRL_H, w: W - pw, h: H - CTRL_H }, pip: { x: W - pw, y: CTRL_H, w: pw, h: H - CTRL_H - 60 } };
+  } else {
+    const pw = Math.round(Math.min(W * 0.32, 300)), ph = Math.round(pw * 0.75);
+    viewRects = { main: { x: 0, y: 0, w: W, h: H }, pip: { x: W - pw - 10, y: H - ph - 10, w: pw, h: ph } };
+  }
+}
 function resize() {
   renderer.setSize(innerWidth, innerHeight, false);
-  camMain.aspect = innerWidth / innerHeight;
+  computeLayout();
+  camMain.aspect = viewRects.main.w / viewRects.main.h;
+  camPip.aspect = viewRects.pip.w / viewRects.pip.h; camPip.updateProjectionMatrix();
   camMain.fov = camMain.aspect < 1.3 ? 48 : 42;   // 縦長・正方形に近い画面は少し広角に（足りない分は placeCamera で引く）
   camMain.updateProjectionMatrix();
   applyView();
@@ -1110,16 +1130,12 @@ function frame(now) {
   pos.needsUpdate = true;
   ui.timer.textContent = settings.mode === 'free' && ['idle', 'free'].includes(game.state) ? Math.ceil(game.timer) : '';
 
-  const W = innerWidth, H = innerHeight;
+  const { main: m, pip: p } = viewRects;
   renderer.setScissorTest(false);
-  renderer.setViewport(0, 0, W, H);
+  renderer.setViewport(m.x, m.y, m.w, m.h);
   renderer.render(scene, camMain);
   if (settings.pip) {
-    // スマホ縦持ちは横からの小窓を大きめ・縦長に（奥行き確認用）
-    const mobile = W <= 700;
-    const pw = Math.round(mobile ? W * 0.46 : Math.min(W * 0.32, 300)), ph = Math.round(pw * (mobile ? 1.0 : 0.75));
-    // スマホ縦持ちでは小窓を右下（操作ボタンの上）に置く
-    const px = W - pw - 8, py = W <= 700 ? 150 : H - ph - 10;
+    const px = p.x, py = p.y, pw = p.w, ph = p.h;
     camPip.aspect = pw / ph; camPip.updateProjectionMatrix();
     renderer.setScissorTest(true);
     renderer.setScissor(px, py, pw, ph); renderer.setViewport(px, py, pw, ph);

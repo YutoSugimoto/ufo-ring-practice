@@ -28,9 +28,10 @@ const RING_SIZES = { L: { R: 0.8, label: '大' }, M: { R: 0.6, label: '中' }, S
 const TUBE = 0.055;
 
 const HEAD_HY = 0.26;
-const ARM_STOP = 2.4;                  // アーム（チェーンの支点）が下りる高さ＝板から 24cm（固定）。届き方はチェーンの長さで調整
-// 既定のチェーン長: 下降しきったとき、まっすぐ垂れたリングの下端が板から 2cm 浮く長さ（リングの大きさで変わる）
-const defaultChain = size => +(ARM_STOP - HEAD_HY - 2 * RING_SIZES[size].R - 0.2).toFixed(2);
+const DEFAULT_CHAIN = 2.2;             // チェーンの既定 22cm
+// アーム（チェーンの支点）が下りる高さ（台の固定設定）: 既定のチェーンでまっすぐ垂れたリングの下端が板から 2cm 浮く高さ。
+// チェーンを伸ばせばリングは板に着いて倒れ込み・滑る
+const armStop = () => HEAD_HY + DEFAULT_CHAIN + 2 * RING_SIZES[settings.size].R + 0.2;
 const chainDrop = () => HEAD_HY + settings.chain;    // ヘッド中心からリング上端まで
 let NOISE = 0.02;
 
@@ -41,7 +42,7 @@ const HOOK = { stemTop: 0.62, apexY: 0.82, apexZ: 0.26, endY: 0.7, endZ: 0.46, t
 const GR = { STATIC: 1, RACK: 2, PRIZE: 4, HEAD: 8, RING: 16, HOOK: 32, SHELF: 64 };
 
 // ---------------------------------------------------------------- 設定・記録
-const DEFAULTS = { chain: 3.0, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0, swing: 0.75, weight: 3.0, random: true, pip: true };
+const DEFAULTS = { chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0, swing: 0.75, random: true, pip: true };
 const savedSettings = localStorage.getItem('ufo-hook-settings');
 const settings = Object.assign({}, DEFAULTS, JSON.parse(savedSettings || '{}'));
 // スマホの初回は重い映り込みをオフにしておく
@@ -57,8 +58,9 @@ if (savedSettings && (settings.v ?? 1) < 5) {
   settings.swing = Math.max(settings.swing, DEFAULTS.swing);
 }
 delete settings.armStop;
-if (!savedSettings || (settings.v ?? 1) < 6) settings.chain = defaultChain(settings.size);
-settings.v = 6;
+if ((settings.v ?? 1) < 7) settings.chain = DEFAULT_CHAIN;   // v7: チェーン既定 22cm・下降位置はリングが 2cm 浮く高さ
+delete settings.weight;
+settings.v = 7;
 localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const saveSettings = () => localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const statKey = () => `ufo-hook-stats-${settings.mode}-${settings.size}`;
@@ -305,6 +307,7 @@ function unlink(body) {
 
 // ---------------------------------------------------------------- 網台・フック・景品（毎ラウンド作り直す）
 const HINGE = { x: CHUTE_X, y: RACK.topY - RACK.thick / 2 };
+const RACK_MASS = 3.0;   // 網台の重さ（固定。掛かれば必ず持ち上がる）
 const MAX_TILT = 35 * Math.PI / 180;
 let round = null;   // { rack, hook, chain, prize, lay, theta }
 
@@ -434,7 +437,7 @@ function updateRack(dt) {
   round.theta = theta;
   // 台の重さ（＋景品の重さを少し）→ チェーンの張力としてフックを下に引く
   const comLever = RACK.len / 2;
-  hook.force.y -= settings.weight * G * comLever / lever;
+  hook.force.y -= RACK_MASS * G * comLever / lever;
   const c = Math.cos(theta), s = Math.sin(theta);
   const rx = comLever * c, ry = comLever * s;
   rack.position.set(HINGE.x + rx, HINGE.y + ry, 0);
@@ -641,9 +644,9 @@ function resetRound() {
   round = { rack: rack.body, attachLocal: rack.attachLocal, hook, chain: makeChainMesh(16, M.gold), prize, lay, theta: 0 };
 
   buildRing();
-  // 下降停止位置（台ごとの固定設定）: アーム（チェーンの支点）が板から ARM_STOP の高さまで下りる。
+  // 下降停止位置（台ごとの固定設定）: アーム（チェーンの支点）が板から armStop() の高さまで下りる。
   // チェーンの長さに関係なく支点は同じ所まで下りるので、長いチェーンほどリングは板の上で大きく倒れて滑る
-  const headY = SHELF.topY + ARM_STOP;
+  const headY = SHELF.topY + armStop();
   game.Ltarget = CARRIAGE_Y - headY;
   game.L = L_HOME;
   placeArm(HOME.x, HOME.z, L_HOME);
@@ -821,8 +824,6 @@ function control(dt) {
         const th = threadTest(ringLowest().n);
         if (th) { game.catch = { deep: th.deep, slipTilt: 14 + Math.random() * 24, late: true }; attachRing(game.catch); }
       }
-      // 浅い掛かりは途中で外れる
-      if (game.catch && !game.catch.deep && rackTilt() >= game.catch.slipTilt) detachRing();
       // 網台が上限まで上がったらそこで上昇停止（チェーンが張ってアームが止まる）
       if (game.L <= L_HOME || round.theta >= MAX_TILT - 1e-3) setState('hold');
       break;
@@ -958,8 +959,6 @@ function bindSettings() {
     r.checked = r.value === settings.size;
     r.onchange = () => {
       settings.size = r.value;
-      settings.chain = defaultChain(settings.size);   // リングを変えたらチェーンも既定の長さに戻す
-      $('chain').value = settings.chain; $('chainVal').textContent = `${Math.round(settings.chain * 10)} cm`;
       saveSettings(); renderStats(); resetRound(); r.blur();
     };
   }
@@ -974,7 +973,6 @@ function bindSettings() {
   ch.value = settings.chain; chOut.textContent = `${Math.round(settings.chain * 10)} cm`;
   ch.oninput = () => { settings.chain = parseFloat(ch.value); chOut.textContent = `${Math.round(settings.chain * 10)} cm`; saveSettings(); };
   ch.onchange = () => { ch.blur(); resetRound(); };
-  slider('weight', 'weight', v => `${(v * 0.1).toFixed(2)} kg`);
   const angleFmt = v => v === 0 ? '0°（正面向き）' : `${Math.abs(v)}° ${v > 0 ? '⟲ 反時計回り' : '⟳ 時計回り'}`;   // 上から見て
   slider('hookYaw', 'hookYaw', angleFmt);
   slider('ringYaw', 'ringYaw', angleFmt);

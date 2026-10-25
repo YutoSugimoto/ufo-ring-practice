@@ -166,12 +166,12 @@ const camPip = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
 const VIEWS = [
   { name: '正面', pos: [0, 14.6, 24], look: [0, 6.6, 0] },   // 立った目線でやや上から
   { name: '右横', pos: [22, 9, 0.3], look: [0, 6.2, 0] },
-  { name: '斜め', pos: [13.5, 14, 14.5], look: [0, 5.8, 0] },
+  { name: '斜め', pos: [13.5, 14, 14.5], look: [0, 5.8, 0], noCorner: true },   // 手前右の柱は描かない（視界の邪魔）
   { name: '真上', pos: [0, 24, 0.01], look: [0, 0, 0], noRoof: true },
 ];
 let viewIdx = 0;
-const ROOF_LAYER = 1;
-camPip.layers.enable(ROOF_LAYER);
+const ROOF_LAYER = 1, CORNER_LAYER = 2;   // 2: 手前右の柱（斜め視点では隠す）
+camPip.layers.enable(ROOF_LAYER); camPip.layers.enable(CORNER_LAYER);
 // 画面の縦横比に合わせて、筐体の横幅が収まる距離までカメラを引く（スマホ縦持ち対応）
 function placeCamera(cam, v, halfW = 5.4, near = 3) {
   const look = new THREE.Vector3(...v.look), dir = new THREE.Vector3(...v.pos).sub(look);
@@ -189,6 +189,7 @@ function applyView() {
   const v = VIEWS[viewIdx];
   placeCamera(camMain, v);
   if (v.noRoof) camMain.layers.disable(ROOF_LAYER); else camMain.layers.enable(ROOF_LAYER);
+  if (v.noCorner) camMain.layers.disable(CORNER_LAYER); else camMain.layers.enable(CORNER_LAYER);
   const p = VIEWS[viewIdx === 1 ? 0 : 1];
   placeCamera(camPip, p, viewIdx === 1 ? 5.4 : 3.4, viewIdx === 1 ? 3 : 4);   // 横からの別視点は奥行き方向（約±3.4）が入ればよい
 }
@@ -260,6 +261,7 @@ function addStaticBox(cx, cy, cz, hx, hy, hz, mesh = null, opts = {}) {
   // 白いフレーム・天井・土台
   for (const x of [CAB.xMin, CAB.xMax]) for (const z of [CAB.zMin, CAB.zMax]) {
     const p = box(0.22, CAB.h + 2.4, 0.22, M.white); p.position.set(x, CAB.h / 2 - 1.2, z); scene.add(p);
+    if (x === CAB.xMax && z === CAB.zMax) { p.layers.set(CORNER_LAYER); p.castShadow = false; }
   }
   const roof = box(W + 0.6, 0.6, D + 0.6, M.white); roof.position.set(0, CAB.h + 0.3, 0); scene.add(roof);
   const ledStrip = box(W - 0.4, 0.06, 0.2, M.led); ledStrip.position.set(0, CAB.h - 0.05, CAB.zMax - 0.3); scene.add(ledStrip);

@@ -637,7 +637,7 @@ const carriageMesh = box(0.8, 0.3, 0.8, M.metal); scene.add(carriageMesh);
 const crossRail = box(0.14, 0.12, RANGE.zMax - RANGE.zMin + 0.8, M.metal); scene.add(crossRail);
 
 // ---------------------------------------------------------------- 難易度「高」
-// リング小・フックとリングの向きは毎回ランダム・揺れやすさ最大・揺れでリングが回るのも最大
+// リング最大・フックとリングの向きは毎回ランダム・揺れやすさ最大・揺れでリングが回るのも最大・落下予測の赤い点なし
 const eff = { hookYaw: 0, ringYaw: 0 };
 const effSwing = () => settings.hard ? 1 : settings.swing;
 const effTwist = () => settings.hard ? 1 : settings.twist;
@@ -656,7 +656,7 @@ const marker = new THREE.Group();
   scene.add(marker);
 }
 function updateMarker() {
-  marker.visible = !!(settings.marker && ring && ['idle', 'fixed1', 'fixed2', 'free', 'wait', 'descend'].includes(game.state));
+  marker.visible = !!(settings.marker && !settings.hard && ring && ['idle', 'fixed1', 'fixed2', 'free', 'wait', 'descend'].includes(game.state));
   if (!marker.visible) return;
   const p = ringLowest().p;
   const onShelf = p.x > SHELF.xMin && p.x < SHELF.xMax && p.z > SHELF.zMin && p.z < SHELF.zMax;
@@ -1091,7 +1091,7 @@ ui.btnDrop.addEventListener('pointerdown', e => { e.preventDefault(); input.drop
 const LEVELS = ['L', 'M', 'S', 'H'];   // 大 → 中 → 小 → 高
 function setLevel(lv) {
   settings.hard = lv === 'H';
-  setRingSize(lv === 'H' ? 'S' : lv);
+  setRingSize(lv === 'H' ? 'L' : lv);
 }
 const levelLabel = () => settings.hard ? '高' : RING_SIZES[settings.size].label;
 function setRingSize(size) {

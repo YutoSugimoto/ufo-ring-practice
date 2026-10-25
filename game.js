@@ -16,6 +16,19 @@ const CAB = { xMin: -4, xMax: 4, zMin: -3, zMax: 3, h: 15.2 };
 const CHUTE_X = -2.1;                 // x < CHUTE_X が取り出し口
 const HOME = { x: -3.0, z: 2.2 };     // アームの初期位置（左手前・取り出し口の上）
 const RANGE = { xMin: -3.2, xMax: 3.3, zMin: -2.5, zMax: 2.3 };
+// リングが大きいと壁（ガラス）に当たって揺れが止まってしまうので、移動範囲と初期位置をリングの大きさに合わせて内側へ
+const WALL_GAP = 0.15;
+function moveRange() {
+  const R = RING_SIZES[settings.size].R + TUBE + WALL_GAP;
+  return {
+    xMin: Math.max(RANGE.xMin, CAB.xMin + R), xMax: Math.min(RANGE.xMax, CAB.xMax - R),
+    zMin: Math.max(RANGE.zMin, CAB.zMin + R), zMax: Math.min(RANGE.zMax, CAB.zMax - R),
+  };
+}
+function homePos() {
+  const r = moveRange();
+  return { x: Math.max(r.xMin, Math.min(r.xMax, HOME.x)), z: Math.max(r.zMin, Math.min(r.zMax, HOME.z)) };
+}
 const CARRIAGE_Y = 14.4;
 const L_HOME = 0.7;
 const SPEEDS = { 0: 1.1, 0.5: 1.6, 1: 2.4 };   // クレーンの移動速度 小 11cm/s・中 16cm/s・大 24cm/s（速いほど止めた時によく揺れる）
@@ -735,7 +748,7 @@ function resetRound({ keepLayout = false, shuffle = false } = {}) {
   const headY = SHELF.topY + armStop();
   game.Ltarget = CARRIAGE_Y - headY;
   game.L = L_HOME;
-  placeArm(HOME.x, HOME.z, L_HOME);
+  { const h = homePos(); placeArm(h.x, h.z, L_HOME); }
   game.vel = { x: 0, z: 0 }; game.timer = FREE_TIME; game.won = false; game.finished = false; game.maxTilt = 0;
   physRng.s = (Math.random() * 4294967296) >>> 0;
   game.restYaw = eff.ringYaw * DEG; game.twistDir = Math.random() < 0.5 ? 1 : -1;
@@ -840,11 +853,11 @@ function control(dt) {
       break;
     case 'fixed1':
       if (input.b1) { want.x = 1; game.moved = true; }
-      if (game.moved && (!input.b1 || cx >= RANGE.xMax - 1e-3)) setState('fixed2');
+      if (game.moved && (!input.b1 || cx >= moveRange().xMax - 1e-3)) setState('fixed2');
       break;
     case 'fixed2':
       if (input.b2) { want.z = -1; game.moved = true; }
-      if (game.moved && (!input.b2 || cz <= RANGE.zMin + 1e-3)) setState('wait');
+      if (game.moved && (!input.b2 || cz <= moveRange().zMin + 1e-3)) setState('wait');
       break;
     case 'free':
       want = { ...input.stick };
@@ -874,7 +887,7 @@ function control(dt) {
       if (game.t > 1.8) setState('return');   // リングが外れて網台が戻る
       break;
     case 'return': {
-      const dx = HOME.x - cx, dz = HOME.z - cz;
+      const home = homePos(), dx = home.x - cx, dz = home.z - cz;
       want.x = Math.sign(dx) * Math.min(1, Math.abs(dx) * 4);
       want.z = Math.sign(dz) * Math.min(1, Math.abs(dz) * 4);
       if (Math.abs(dx) < 0.02 && Math.abs(dz) < 0.02 && Math.hypot(game.vel.x, game.vel.z) < 0.1) setState('result');
@@ -899,10 +912,11 @@ function control(dt) {
     game.vel[k] += Math.max(-ACCEL * dt, Math.min(ACCEL * dt, dv));
   }
   let vx = game.vel.x, vz = game.vel.z;
-  if (cx + vx * dt > RANGE.xMax) { vx = (RANGE.xMax - cx) / dt; game.vel.x = 0; }
-  if (cx + vx * dt < RANGE.xMin) { vx = (RANGE.xMin - cx) / dt; game.vel.x = 0; }
-  if (cz + vz * dt > RANGE.zMax) { vz = (RANGE.zMax - cz) / dt; game.vel.z = 0; }
-  if (cz + vz * dt < RANGE.zMin) { vz = (RANGE.zMin - cz) / dt; game.vel.z = 0; }
+  const mr = moveRange();
+  if (cx + vx * dt > mr.xMax) { vx = (mr.xMax - cx) / dt; game.vel.x = 0; }
+  if (cx + vx * dt < mr.xMin) { vx = (mr.xMin - cx) / dt; game.vel.x = 0; }
+  if (cz + vz * dt > mr.zMax) { vz = (mr.zMax - cz) / dt; game.vel.z = 0; }
+  if (cz + vz * dt < mr.zMin) { vz = (mr.zMin - cz) / dt; game.vel.z = 0; }
   carriage.velocity.set(vx, 0, vz);
   // ヘッドはキャリッジの真下、ワイヤー長 L の位置へ（速度で動かして接触も正しく）
   const ty = CARRIAGE_Y - game.L;

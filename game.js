@@ -32,6 +32,10 @@ const DEFAULT_CHAIN = 2.2;             // チェーンの既定 22cm
 // アームが下りる高さ（台の固定設定）: 既定のチェーンで、リングとチェーンをつなぐ金具（リングの付け根）が
 // 板から 2cm 浮く高さ。リング本体は板に着いて斜めに寝る。チェーンを伸ばすと付け根も板に着いてリングが平らに倒れる
 const armStop = () => HEAD_HY + DEFAULT_CHAIN + 0.2;
+// チェーンの最短: 下降しきったとき、まっすぐ垂れたリングの下端が板に届く長さ（これより短いとフックに届かず取れない）
+// 大 8cm / 中 12cm / 小 15cm
+const chainMin = size => Math.ceil((armStop() - HEAD_HY - 2 * RING_SIZES[size].R) * 20) / 20;
+const CHAIN_MAX = 4.0;
 const chainDrop = () => HEAD_HY + settings.chain;    // ヘッド中心からリング上端まで
 let NOISE = 0.02;
 
@@ -950,6 +954,14 @@ function renderStats() {
 }
 
 // 設定パネル
+// リングの大きさに合わせてチェーンの調整範囲を変え、範囲外なら収める
+function updateChainRange() {
+  const ch = $('chain'), min = chainMin(settings.size);
+  ch.min = min; ch.max = CHAIN_MAX;
+  settings.chain = Math.min(CHAIN_MAX, Math.max(min, settings.chain));
+  ch.value = settings.chain;
+  $('chainVal').textContent = `${Math.round(settings.chain * 10)} cm`;
+}
 function bindSettings() {
   $('settingsToggle').onclick = () => $('settings').classList.toggle('collapsed');
   if (innerWidth < 700) $('settings').classList.add('collapsed');
@@ -959,6 +971,7 @@ function bindSettings() {
     r.checked = r.value === settings.size;
     r.onchange = () => {
       settings.size = r.value;
+      updateChainRange();
       saveSettings(); renderStats(); resetRound(); r.blur();
     };
   }
@@ -970,7 +983,7 @@ function bindSettings() {
   };
   slider('swing', 'swing', v => ['ほぼ無し', '小', '中', '大', '最大'][Math.round(v * 4)]);
   const ch = $('chain'), chOut = $('chainVal');
-  ch.value = settings.chain; chOut.textContent = `${Math.round(settings.chain * 10)} cm`;
+  updateChainRange();
   ch.oninput = () => { settings.chain = parseFloat(ch.value); chOut.textContent = `${Math.round(settings.chain * 10)} cm`; saveSettings(); };
   ch.onchange = () => { ch.blur(); resetRound(); };
   const angleFmt = v => v === 0 ? '0°（正面向き）' : `${Math.abs(v)}° ${v > 0 ? '⟲ 反時計回り' : '⟳ 時計回り'}`;   // 上から見て

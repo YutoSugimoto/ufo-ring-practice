@@ -91,7 +91,7 @@ const cm = (a, b, friction, restitution = 0.05) =>
   world.addContactMaterial(new CANNON.ContactMaterial(a, b, { friction, restitution }));
 cm(mat.prize, mat.rack, 0.12);
 cm(mat.prize, mat.stat, 0.45);
-cm(mat.ring, mat.hook, 0.2, 0);
+cm(mat.ring, mat.hook, 0.02, 0);   // フックの表面はよく滑る（上に乗ったリングは滑り落ちる）
 // アクリル板とリングの摩擦（設定「床の滑りやすさ」で切り替え）。既定はよく滑る:
 // 着地後、リングの付け根（チェーンの支点）は落ちた位置から動かず、板に着いた先端側が滑って倒れる
 const ringShelfCM = new CANNON.ContactMaterial(mat.ring, mat.shelf, { friction: 0.03, restitution: 0 });
@@ -750,6 +750,8 @@ function threadTest(n) {
   // フックの穴は開いている側からしか入れない。反対側（柱の裏）から被さったリングは掛からない
   const od = hook.quaternion.vmult(V(0, 0, d));
   if (c.vsub(pts[0]).dot(od) < 0.05) return null;
+  // フックの上に乗っている（めり込んでいる）だけのリングは掛かっていない: 輪の最下点がアーチより下まで下りていること
+  if (ringLowest().p.y - SHELF.topY > HOOK.endY - 0.12) return null;
   for (let i = 0; i < pts.length - 1; i++) {
     const a = pts[i], b = pts[i + 1];
     const da = a.vsub(c).dot(n), db = b.vsub(c).dot(n);
@@ -834,7 +836,8 @@ function control(dt) {
     case 'lift':
       game.L = Math.max(L_HOME, game.L - LIFT_SPEED * dt);
       // 引き上げで板の上を引きずられたリングが、フックの穴に滑り込んだら掛かる
-      if (!game.catch && game.t < 2.0 && ringLowest().p.y - SHELF.topY < HOOK.apexY) {
+      // （下降停止の時点でリングがフックの開いている側にあった場合だけ。裏側から引きずられて被さるのは掛からない）
+      if (!game.catch && game.t < 2.0 && (game.lastJudge?.s ?? -1) >= 0.05 && ringLowest().p.y - SHELF.topY < HOOK.apexY) {
         const th = threadTest(ringLowest().n);
         if (th) { game.catch = { deep: th.deep, slipTilt: 14 + Math.random() * 24, late: true }; attachRing(game.catch); }
       }

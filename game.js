@@ -46,7 +46,7 @@ const HOOK = { stemTop: 0.62, apexY: 0.82, apexZ: 0.26, endY: 0.7, endZ: 0.46, t
 const GR = { STATIC: 1, RACK: 2, PRIZE: 4, HEAD: 8, RING: 16, HOOK: 32, SHELF: 64 };
 
 // ---------------------------------------------------------------- 設定・記録
-const DEFAULTS = { floorMu: 0.03, chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0, swing: 0.75, random: true, pip: true };
+const DEFAULTS = { floorMu: 0.03, chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.75, random: true, pip: true };
 const savedSettings = localStorage.getItem('ufo-hook-settings');
 const settings = Object.assign({}, DEFAULTS, JSON.parse(savedSettings || '{}'));
 // スマホの初回は重い映り込みをオフにしておく
@@ -62,9 +62,10 @@ if (savedSettings && (settings.v ?? 1) < 5) {
   settings.swing = Math.max(settings.swing, DEFAULTS.swing);
 }
 delete settings.armStop;
-if ((settings.v ?? 1) < 7) settings.chain = DEFAULT_CHAIN;   // v7: チェーン既定 22cm・下降位置はリングが 2cm 浮く高さ
+if ((settings.v ?? 1) < 7) settings.chain = DEFAULT_CHAIN;
+if ((settings.v ?? 1) < 8 && !settings.twist) settings.twist = DEFAULTS.twist;   // v8: 揺れでリングが回るを既定でオン   // v7: チェーン既定 22cm・下降位置はリングが 2cm 浮く高さ
 delete settings.weight;
-settings.v = 7;
+settings.v = 8;
 localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const saveSettings = () => localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const statKey = () => `ufo-hook-stats-${settings.mode}-${settings.size}`;
@@ -734,8 +735,8 @@ function judgeCatch() {
   if (h > HOOK.tipY + 0.12) return null;                          // 下りきっていない・フックの上に乗った
   if (up.y < 0.5 && lean > 0) return null;                        // 外側へ寝てしまった
   const lo = HOOK.endZ + 0.03;
-  let hi = HOOK.endZ + 0.15 + 0.45 * R;
-  hi += vin > 0 ? Math.min(0.15, 0.07 * vin) : Math.max(-0.12, 0.05 * vin);   // 振れの向きで届く範囲が変わる
+  let hi = HOOK.endZ + 0.1 + 0.3 * R;
+  hi += vin > 0 ? Math.min(0.06, 0.03 * vin) : Math.max(-0.12, 0.05 * vin);   // 振れの向きで届く範囲が変わる
   if (s < HOOK.apexZ || s > hi) return null;                      // 柱側すぎる／離れすぎ
   const deep = s < lo + Math.max(0, hi - lo) * (0.55 + Math.max(-0.3, Math.min(0.3, 0.1 * vin)));
   return { deep, slipTilt: 14 + Math.random() * 24 };
@@ -746,12 +747,12 @@ function threadTest(n) {
   const { hook, lay } = round, d = lay.dir, H = HOOK;
   const pts = [V(0, -0.1, 0), V(0, H.stemTop, 0), V(0, H.apexY, d * H.apexZ), V(0, H.endY, d * H.endZ), V(0, H.tipY, d * H.endZ)]
     .map(p => hook.pointToWorldFrame(p));
-  const c = ring.position, inner = ringR - TUBE - HOOK.w - 0.02;
+  const c = ring.position, inner = ringR - TUBE - HOOK.w - 0.07;
   // フックの穴は開いている側からしか入れない。反対側（柱の裏）から被さったリングは掛からない
   const od = hook.quaternion.vmult(V(0, 0, d));
   if (c.vsub(pts[0]).dot(od) < 0.05) return null;
   // フックの上に乗っている（めり込んでいる）だけのリングは掛かっていない: 輪の最下点がアーチより下まで下りていること
-  if (ringLowest().p.y - SHELF.topY > HOOK.endY - 0.12) return null;
+  if (ringLowest().p.y - SHELF.topY > HOOK.tipY + 0.05) return null;   // 先端より下まで潜っていること
   for (let i = 0; i < pts.length - 1; i++) {
     const a = pts[i], b = pts[i + 1];
     const da = a.vsub(c).dot(n), db = b.vsub(c).dot(n);
@@ -837,7 +838,7 @@ function control(dt) {
       game.L = Math.max(L_HOME, game.L - LIFT_SPEED * dt);
       // 引き上げで板の上を引きずられたリングが、フックの穴に滑り込んだら掛かる
       // （下降停止の時点でリングがフックの開いている側にあった場合だけ。裏側から引きずられて被さるのは掛からない）
-      if (!game.catch && game.t < 2.0 && (game.lastJudge?.s ?? -1) >= 0.05 && ringLowest().p.y - SHELF.topY < HOOK.apexY) {
+      if (!game.catch && game.t < 2.0 && (game.lastJudge?.s ?? -1) >= 0.05 && ringLowest().p.y - SHELF.topY < HOOK.tipY) {
         const th = threadTest(ringLowest().n);
         if (th) { game.catch = { deep: th.deep, slipTilt: 14 + Math.random() * 24, late: true }; attachRing(game.catch); }
       }

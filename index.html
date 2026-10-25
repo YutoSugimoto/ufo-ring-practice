@@ -11,7 +11,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg">
 <title>リング × フック クレーンゲーム練習</title>
-<link rel="stylesheet" href="style.css?v=20261026l">
+<link rel="stylesheet" href="style.css?v=20261026m">
 <script type="importmap">
 {
   "imports": {
@@ -39,6 +39,9 @@
       <label class="chip"><input type="radio" name="size" value="M">中</label>
       <label class="chip"><input type="radio" name="size" value="S">小</label>
     </div>
+    <label>クレーンの移動速度 <span id="speedVal"></span>
+      <input type="range" id="speed" min="0" max="1" step="0.5">
+    </label>
     <label>リングの揺れやすさ <span id="swingVal"></span>
       <input type="range" id="swing" min="0" max="1" step="0.05">
     </label>
@@ -97,6 +100,6 @@
 
 <div id="help" class="panel"></div>
 
-<script type="module" src="game.js?v=20261026l"></script>
+<script type="module" src="game.js?v=20261026m"></script>
 </body>
 </html>

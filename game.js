@@ -18,7 +18,7 @@ const HOME = { x: -3.0, z: 2.2 };     // アームの初期位置（左手前・
 const RANGE = { xMin: -3.2, xMax: 3.3, zMin: -2.5, zMax: 2.3 };
 const CARRIAGE_Y = 14.4;
 const L_HOME = 0.7;
-const MOVE_SPEED = 1.6;               // 16cm/s
+const SPEEDS = { 0: 1.1, 0.5: 1.6, 1: 2.4 };   // クレーンの移動速度 小 11cm/s・中 16cm/s・大 24cm/s（速いほど止めた時によく揺れる）
 const ACCEL = 60;                     // 実機のガントリーはほぼ急発進・急停止（アーム本体は揺れず、リングだけが振れる）
 const DESCEND_SPEED = 1.4;
 const LIFT_SPEED = 1.0;
@@ -46,7 +46,7 @@ const HOOK = { stemTop: 0.62, apexY: 0.82, apexZ: 0.26, endY: 0.7, endZ: 0.46, t
 const GR = { STATIC: 1, RACK: 2, PRIZE: 4, HEAD: 8, RING: 16, HOOK: 32, SHELF: 64 };
 
 // ---------------------------------------------------------------- 設定・記録
-const DEFAULTS = { hard: false, marker: true, floorMu: 0.03, chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.75, random: true, pip: true };
+const DEFAULTS = { speed: 0.5, hard: false, marker: true, floorMu: 0.03, chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.75, random: true, pip: true };
 const savedSettings = localStorage.getItem('ufo-hook-settings');
 const settings = Object.assign({}, DEFAULTS, JSON.parse(savedSettings || '{}'));
 // スマホの初回は重い映り込みをオフにしておく
@@ -638,7 +638,7 @@ const carriageMesh = box(0.8, 0.3, 0.8, M.metal); scene.add(carriageMesh);
 const crossRail = box(0.14, 0.12, RANGE.zMax - RANGE.zMin + 0.8, M.metal); scene.add(crossRail);
 
 // ---------------------------------------------------------------- 難易度「高」
-// リング最大・フックとリングの向きは毎回ランダム・揺れやすさ最大・揺れでリングが回るのも最大・落下予測の赤い点なし
+// リング最大・クレーン速度大・フックとリングの向きは毎回ランダム・揺れやすさ最大・揺れでリングが回るのも最大・落下予測の赤い点なし
 const eff = { hookYaw: 0, ringYaw: 0 };
 const effSwing = () => settings.hard ? 1 : settings.swing;
 const effTwist = () => settings.hard ? 1 : settings.twist;
@@ -906,7 +906,7 @@ function control(dt) {
 
   // キャリッジ（ガントリー）の移動。急停止すると吊られたアームとリングが振り子のように揺れる
   for (const k of ['x', 'z']) {
-    const target = (want[k] || 0) * MOVE_SPEED;
+    const target = (want[k] || 0) * SPEEDS[settings.hard ? 1 : settings.speed];
     const dv = target - game.vel[k];
     game.vel[k] += Math.max(-ACCEL * dt, Math.min(ACCEL * dt, dv));
   }
@@ -1053,6 +1053,7 @@ function bindSettings() {
     el.oninput = () => { settings[key] = parseFloat(el.value); out.textContent = fmt(settings[key]); saveSettings(); applyPhysicsSettings(); };
     el.onchange = () => el.blur();
   };
+  slider('speed', 'speed', v => ['小（遅い）', '中', '大（速い）'][v * 2]);
   slider('swing', 'swing', v => ['ほぼ無し', '小', '中', '大', '最大'][Math.round(v * 4)]);
   slider('floorMu', 'floorMu', v => `μ=${v.toFixed(2)}${v <= 0.05 ? '（よく滑る）' : v >= 0.4 ? '（滑らない）' : ''}`);
   const ch = $('chain'), chOut = $('chainVal');

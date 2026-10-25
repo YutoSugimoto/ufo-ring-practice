@@ -67,7 +67,7 @@ const FLOOR_MU = { defaultKinetic: 0.3, staticRatio: 1.35, staticExtra: 0.02, st
 const floorMuS = () => settings.floorMuK * FLOOR_MU.staticRatio + FLOOR_MU.staticExtra;
 
 // ---------------------------------------------------------------- 設定・記録
-const DEFAULTS = { speed: 0.5, difficulty: 'normal', marker: true, floorMuK: FLOOR_MU.defaultKinetic, chain: DEFAULT_CHAIN, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'front', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.25, random: true, pip: true };
+const DEFAULTS = { speed: 0.5, difficulty: 'normal', marker: true, floorMuK: FLOOR_MU.defaultKinetic, chain: DEFAULT_CHAIN, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'front', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.5, random: true, pip: true };
 const savedSettings = localStorage.getItem('ufo-hook-settings');
 const storedSettings = JSON.parse(savedSettings || '{}') || {};
 const settings = Object.assign({}, DEFAULTS, storedSettings);
@@ -101,7 +101,8 @@ if ((storedSettings.v ?? 1) < 19) { settings.reflect = true; if (!(settings.twis
 delete settings.hint;   // ヒントモードは廃止
 if (savedSettings && (storedSettings.v ?? 1) < 21) { settings.chain = Math.max(settings.chain, DEFAULT_CHAIN); settings.swing = Math.max(settings.swing, DEFAULTS.swing); }   // v21: もっと揺れる既定に
 if (savedSettings && (storedSettings.v ?? 1) < 22) { settings.floorMuK = DEFAULTS.floorMuK; settings.swing = DEFAULTS.swing; }   // v22: 床 μ=0.3・揺れやすさ小
-settings.v = 22;
+if (savedSettings && (storedSettings.v ?? 1) < 23) settings.swing = DEFAULTS.swing;   // v23: 揺れやすさ中
+settings.v = 23;
 localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const saveSettings = () => localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const statKey = () => {

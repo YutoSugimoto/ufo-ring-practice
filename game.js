@@ -20,7 +20,7 @@ const CARRIAGE_Y = 14.4;
 const L_HOME = 0.7;
 const SPEEDS = { 0: 1.1, 0.5: 1.6, 1: 2.4 };   // クレーンの移動速度 小 11cm/s・中 16cm/s・大 24cm/s（速いほど止めた時によく揺れる）
 const ACCEL = 60;                     // 実機のガントリーはほぼ急発進・急停止（アーム本体は揺れず、リングだけが振れる）
-const DESCEND_SPEED = 3.4;          // 下降は速め（実機もストンと下りる。ヒント計算も速くなる）
+const DESCEND_SPEED = 1.4;
 const LIFT_SPEED = 1.0;
 const BOTTOM_HOLD = 1.2;             // 下降停止後、引き上げまでの待ち時間
 const FREE_TIME = 15;
@@ -52,7 +52,7 @@ const FLOOR_MU = { defaultKinetic: 0.12, staticRatio: 1.35, staticExtra: 0.02, s
 const floorMuS = () => settings.floorMuK * FLOOR_MU.staticRatio + FLOOR_MU.staticExtra;
 
 // ---------------------------------------------------------------- 設定・記録
-const DEFAULTS = { hint: false, speed: 0.5, difficulty: 'normal', marker: true, floorMuK: FLOOR_MU.defaultKinetic, chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'front', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.65, random: true, pip: true };
+const DEFAULTS = { speed: 0.5, difficulty: 'normal', marker: true, floorMuK: FLOOR_MU.defaultKinetic, chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'front', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.65, random: true, pip: true };
 const savedSettings = localStorage.getItem('ufo-hook-settings');
 const storedSettings = JSON.parse(savedSettings || '{}') || {};
 const settings = Object.assign({}, DEFAULTS, storedSettings);
@@ -83,7 +83,7 @@ delete settings.weight;
 delete settings.hard;
 if ((storedSettings.v ?? 1) < 18) { settings.hookDir = 'front'; settings.hookYaw = 90; settings.ringYaw = 90; }   // v18: フック真ん中固定・右開き 90°
 if ((storedSettings.v ?? 1) < 19) { settings.reflect = true; if (!(settings.twist > 0)) settings.twist = 0.5; }   // v19: 映り込みオン・揺れでリングが回るを中で既定オン
-if ((storedSettings.v ?? 1) < 20) settings.hint = false;   // v20: ヒントは既定オフ（ヒートマップ版）
+delete settings.hint;   // ヒントモードは廃止
 settings.v = 20;
 localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const saveSettings = () => localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
@@ -1049,8 +1049,6 @@ function bindSettings() {
   hd.onchange = () => { settings.hookDir = hd.value; saveSettings(); resetRound(); hd.blur(); };
   const pip = $('pip'); pip.checked = settings.pip; document.body.classList.toggle('pip', settings.pip);
   pip.onchange = () => { settings.pip = pip.checked; saveSettings(); document.body.classList.toggle('pip', settings.pip); resize(); pip.blur(); };
-  const hintEl = $('hint'); hintEl.checked = settings.hint;
-  hintEl.onchange = () => { settings.hint = hintEl.checked; saveSettings(); hintEl.blur(); heat.t = 0; };
   for (const key of ['reflect', 'grid', 'marker']) {
     const el = $(key); el.checked = settings[key];
     el.onchange = () => { settings[key] = el.checked; saveSettings(); applyShelfOptions(); el.blur(); };
@@ -1187,95 +1185,6 @@ function resize() {
 }
 addEventListener('resize', resize);
 
-// ---------------------------------------------------------------- ヒントモード（ヒートマップ）
-// アームを止める位置ごとに「取れる確率」をタイルで表示する。物理演算はせず、今のリングの揺れから簡単に計算する:
-//  ・リングの揺れ = 付け根まわりの振り子（2 次元の単振動）。今のずれ d と速度 v から、着地時の位相は分からないので
-//    位相を一様にばらした時の着地位置の分布を考える（左に振れている時に押すか右の時かで変わる分を % で表す）
-//  ・止めた時の急停止で、移動方向に「速さ/ω」の揺れが加わる（位相はやはり不明としてばらす）
-//  ・着地までの時間（停止→下降）で減衰させる
-//  ・着地点（＝止めた位置＋揺れのずれ）がフックの「開いている側の手前」の帯に入れば取れる、とする
-// 帯の大きさは物理シミュレーションで確かめた範囲（中リング: 先端から 1〜4cm 手前、左右 ±2.5cm）を目安に、リングの大きさで伸縮
-const HEAT = { half: 1.1, cell: 0.1, every: 0.12 };
-const heat = { t: 0, mesh: null, canvas: null, ctx: null, tex: null, n: 0 };
-{
-  heat.n = Math.round(HEAT.half * 2 / HEAT.cell);
-  heat.canvas = document.createElement('canvas');
-  heat.canvas.width = heat.canvas.height = heat.n * 40;
-  heat.ctx = heat.canvas.getContext('2d');
-  heat.tex = new THREE.CanvasTexture(heat.canvas); heat.tex.colorSpace = THREE.SRGBColorSpace;
-  heat.mesh = new THREE.Mesh(new THREE.PlaneGeometry(HEAT.half * 2, HEAT.half * 2),
-    new THREE.MeshBasicMaterial({ map: heat.tex, transparent: true, depthWrite: false }));
-  heat.mesh.rotation.x = -Math.PI / 2; heat.mesh.renderOrder = 6; heat.mesh.visible = false;
-  scene.add(heat.mesh);
-}
-// 止める位置 (sx, sz) に対する取れる確率
-function heatProbabilities(movingAxis) {
-  const { lay } = round, R = ringR;
-  const od = round.hook.quaternion.vmult(V(0, 0, lay.dir));                 // 開いている向き
-  const perp = V(od.z, 0, -od.x);
-  const n = ring.quaternion.vmult(V(0, 0, 1));
-  const align = Math.min(1, Math.abs(od.x * n.x + od.z * n.z) / 0.7);       // リング面がフックの向きに合っているほど 1
-  const sMin = HOOK.endZ - 0.36 + 0.1 * (R - 0.6), sMax = HOOK.endZ - 0.06 + 0.5 * (R - 0.6);   // 着地点の帯（開いている向きの距離）
-  const latMax = 0.25 * R / 0.6;
-  // 今の揺れ（付け根まわりの振り子）
-  const Leff = rope.distance + R;
-  const w = Math.sqrt(G / Leff);
-  const dx = ring.position.x - head.position.x, dz = ring.position.z - head.position.z;
-  const vx = (ring.velocity.x - head.velocity.x) / w, vz = (ring.velocity.z - head.velocity.z) / w;
-  // 着地までの時間と減衰
-  const descT = 0.5 + Math.max(0, game.Ltarget - game.L) / DESCEND_SPEED;
-  const decay = Math.pow(1 - ring.linearDamping, descT / 2);
-  const speed = SPEEDS[isHighDifficulty() ? 1 : isEasyDifficulty() ? 0 : settings.speed];
-  const kick = speed / w * 0.6;                                              // 急停止で加わる揺れ
-  const P = 16, Q = 6;
-  const out = new Float32Array(heat.n * heat.n);
-  const cx0 = lay.x - HEAT.half + HEAT.cell / 2, cz0 = lay.z - HEAT.half + HEAT.cell / 2;
-  for (let iz = 0; iz < heat.n; iz++) for (let ix = 0; ix < heat.n; ix++) {
-    const sx = cx0 + ix * HEAT.cell, sz = cz0 + iz * HEAT.cell;
-    // 移動中の軸の方向（①なら +x、②なら -z、待機中は両方）に止めた時の揺れ
-    let hit = 0;
-    for (let i = 0; i < P; i++) {
-      const a = (i + 0.5) / P * Math.PI * 2;
-      const ox = (dx * Math.cos(a) + vx * Math.sin(a)) * decay, oz = (dz * Math.cos(a) + vz * Math.sin(a)) * decay;
-      for (let j = 0; j < Q; j++) {
-        const b = (j + 0.5) / Q * Math.PI * 2, k = Math.cos(b) * kick * decay;
-        const kx = movingAxis !== 'z' ? k : 0, kz = movingAxis !== 'x' ? -k : 0;
-        const px = sx + ox + kx - lay.x, pz = sz + oz + kz - lay.z;
-        const s = px * od.x + pz * od.z, lat = px * perp.x + pz * perp.z;
-        if (s > sMin && s < sMax && Math.abs(lat) < latMax) hit++;
-      }
-    }
-    out[iz * heat.n + ix] = hit / (P * Q) * align;
-  }
-  return out;
-}
-function drawHeat(prob) {
-  const g = heat.ctx, n = heat.n, c = heat.canvas.width / n;
-  g.clearRect(0, 0, heat.canvas.width, heat.canvas.height);
-  g.font = `bold ${Math.round(c * 0.42)}px sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
-  for (let iz = 0; iz < n; iz++) for (let ix = 0; ix < n; ix++) {
-    const p = prob[iz * n + ix];
-    if (p < 0.05) continue;
-    // 低い→黄、高い→緑（キャンバスの y はワールドの z と同じ向き）
-    const hue = 50 + 80 * p;
-    g.fillStyle = `hsla(${hue}, 85%, 45%, ${0.25 + 0.5 * p})`;
-    g.fillRect(ix * c + 1, iz * c + 1, c - 2, c - 2);
-    if (p >= 0.1) { g.fillStyle = 'rgba(255,255,255,0.95)'; g.fillText(`${Math.round(p * 100)}`, ix * c + c / 2, iz * c + c / 2); }
-  }
-  heat.tex.needsUpdate = true;
-}
-function updateHeat(dt) {
-  const show = settings.hint && round && ring && ['idle', 'fixed1', 'fixed2', 'free'].includes(game.state);
-  heat.mesh.visible = !!show;
-  if (!show) return;
-  heat.mesh.position.set(round.lay.x, SHELF.topY + 0.02, round.lay.z);
-  heat.t -= dt;
-  if (heat.t > 0) return;
-  heat.t = HEAT.every;
-  const axis = game.state === 'fixed2' ? 'z' : game.state === 'fixed1' ? 'x' : 'both';
-  drawHeat(heatProbabilities(axis));
-}
-
 let last = performance.now(), acc = 0, lastState = null;
 function stepSim(dt) {
   acc += dt;
@@ -1286,11 +1195,6 @@ function frame(now) {
   pollInput();
   if (!game.paused) stepSim(dt);
   if (game.state !== lastState) { lastState = game.state; updateUI(); }
-  updateHeat(dt);
-  if (settings.hint && heat.mesh.visible) {
-    const base = STATUS[game.state]?.() ?? '';
-    ui.status.textContent = `${base}（ヒント: 数字＝そこで止めた時に取れる確率%）`;
-  }
 
   for (const { body, obj } of synced) { obj.position.copy(body.position); obj.quaternion.copy(body.quaternion); }
   updateChainVisual();
@@ -1326,4 +1230,4 @@ renderStats();
 requestAnimationFrame(frame);
 
 // デバッグ用（ブラウザのコンソールから物理を早送りして検証できる）
-window.__ufo = { heat, heatProbabilities, camMain, input, setNoise: v => (NOISE = v), game, world, head, carriage, settings, resetRound, rackTilt, placeArm, stepSim, get round() { return round; }, get ring() { return ring; } };
+window.__ufo = { camMain, input, setNoise: v => (NOISE = v), game, world, head, carriage, settings, resetRound, rackTilt, placeArm, stepSim, get round() { return round; }, get ring() { return ring; } };

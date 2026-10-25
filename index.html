@@ -11,7 +11,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg">
 <title>リング × フック クレーンゲーム練習</title>
-<link rel="stylesheet" href="style.css?v=20261026zd">
+<link rel="stylesheet" href="style.css?v=20261026zf">
 <script type="importmap">
 {
   "imports": {
@@ -53,9 +53,8 @@
     </label>
     <label>フックの向き（開いている側）
       <select id="hookDir">
-        <option value="random">ランダム</option>
-        <option value="front">手前に開く</option>
-        <option value="back">奥に開く</option>
+        <option value="front">標準（回転90°で右に開く）</option>
+        <option value="back">反対向き</option>
       </select>
     </label>
     <label>フックの回転 <span id="hookYawVal"></span>
@@ -67,7 +66,6 @@
     <label>揺れでリングが回る <span id="twistVal"></span>
       <input type="range" id="twist" min="0" max="1" step="0.25">
     </label>
-    <label class="check"><input type="checkbox" id="random"> フックの位置をランダムにする</label>
     <label class="check"><input type="checkbox" id="pip"> 横からの小窓を表示</label>
     <label class="check"><input type="checkbox" id="reflect"> アクリル板の映り込み</label>
     <label class="check"><input type="checkbox" id="marker"> 落下予測地点を赤く表示</label>
@@ -101,6 +99,6 @@
 
 <div id="help" class="panel"></div>
 
-<script type="module" src="game.js?v=20261026zd"></script>
+<script type="module" src="game.js?v=20261026zf"></script>
 </body>
 </html>

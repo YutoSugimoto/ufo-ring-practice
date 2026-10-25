@@ -52,7 +52,7 @@ const FLOOR_MU = { defaultKinetic: 0.12, staticRatio: 1.35, staticExtra: 0.02, s
 const floorMuS = () => settings.floorMuK * FLOOR_MU.staticRatio + FLOOR_MU.staticExtra;
 
 // ---------------------------------------------------------------- 設定・記録
-const DEFAULTS = { speed: 0.5, difficulty: 'normal', marker: true, floorMuK: FLOOR_MU.defaultKinetic, chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.65, random: true, pip: true };
+const DEFAULTS = { speed: 0.5, difficulty: 'normal', marker: true, floorMuK: FLOOR_MU.defaultKinetic, chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'front', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.65, random: true, pip: true };
 const savedSettings = localStorage.getItem('ufo-hook-settings');
 const storedSettings = JSON.parse(savedSettings || '{}') || {};
 const settings = Object.assign({}, DEFAULTS, storedSettings);
@@ -81,7 +81,8 @@ if (savedSettings && (storedSettings.v ?? 1) < 17) settings.floorMuK = DEFAULTS.
 delete settings.floorMu;
 delete settings.weight;
 delete settings.hard;
-settings.v = 17;
+if ((storedSettings.v ?? 1) < 18) { settings.hookDir = 'front'; settings.hookYaw = 90; settings.ringYaw = 90; }   // v18: フック真ん中固定・右開き 90°
+settings.v = 18;
 localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const saveSettings = () => localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const statKey = () => {
@@ -342,12 +343,13 @@ const RACK_MASS = 3.0;   // 網台の重さ（固定。掛かれば必ず持ち�
 const MAX_TILT = 35 * Math.PI / 180;
 let round = null;   // { rack, hook, chain, prize, lay, theta }
 
+// フックの位置は既定で真ん中に固定。開いている側は既定で右（hookYaw 90° と dir +1）。
+// 配置変更ボタンでは、中心付近で位置を少し動かし、フックとリングの角度をランダムにする
 function randomLayout(shuffle = false) {
   if (game.forceLayout) return { ...game.forceLayout };
-  // フックの開いている側（+1: 手前 / -1: 奥）。配置変更ボタンでは設定に関係なく位置・向きともランダム
-  const dir = !shuffle && settings.hookDir === 'front' ? 1 : !shuffle && settings.hookDir === 'back' ? -1 : (Math.random() < 0.5 ? 1 : -1);
-  if (!settings.random && !shuffle) return { x: 0.9, z: 0.0, dir };
-  return { x: 0.3 + Math.random() * 1.0, z: -1.0 + Math.random() * 1.8, dir };
+  const dir = settings.hookDir === 'back' ? -1 : 1;
+  if (!shuffle) return { x: 0.9, z: 0.0, dir };
+  return { x: 0.9 + (Math.random() * 2 - 1) * 0.35, z: (Math.random() * 2 - 1) * 0.6, dir };
 }
 
 function buildRack(lay) {
@@ -708,7 +710,7 @@ function resetRound({ keepLayout = false, shuffle = false } = {}) {
     for (const b of [round.rack, round.hook, round.prize]) unlink(b);
     scene.remove(round.chain);
   }
-  const lay = keepLayout && round ? { ...round.lay } : shuffle ? randomLayout(true) : randomLayout();
+  const lay = keepLayout && round ? { ...round.lay } : randomLayout(shuffle);
   lay.prizeZ ??= settings.random ? (Math.random() * 2 - 1) * 0.3 : 0;
   const rack = buildRack(lay);
   const hook = buildHook(lay);
@@ -1020,8 +1022,6 @@ function bindSettings() {
   slider('twist', 'twist', v => v === 0 ? 'なし' : ['', '少し', '中', '大', '最大'][Math.ceil(v * 4)]);
   const hd = $('hookDir'); hd.value = settings.hookDir;
   hd.onchange = () => { settings.hookDir = hd.value; saveSettings(); resetRound(); hd.blur(); };
-  const rnd = $('random'); rnd.checked = settings.random;
-  rnd.onchange = () => { settings.random = rnd.checked; saveSettings(); resetRound(); rnd.blur(); };
   const pip = $('pip'); pip.checked = settings.pip; document.body.classList.toggle('pip', settings.pip);
   pip.onchange = () => { settings.pip = pip.checked; saveSettings(); document.body.classList.toggle('pip', settings.pip); resize(); pip.blur(); };
   for (const key of ['reflect', 'grid', 'marker']) {

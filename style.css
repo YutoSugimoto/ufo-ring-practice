@@ -88,6 +88,8 @@ button.round.sub {
 }
 button.round.sub.level { background: #7fc8ff; line-height: 1.15; }
 button.round.sub.level b { font-size: 15px; }
+button.round.sub.level.hard { background: #ff5a5a; }
+#btnMode { position: fixed; left: 10px; bottom: calc(150px + env(safe-area-inset-bottom)); z-index: 5; background: #9b8cff; font-size: 11px; line-height: 1.2; }
 button.round.sub.reset { background: #ff7eb6; font-size: 12px; }
 .hidden { display: none !important; }
 
@@ -102,7 +104,7 @@ button.round.sub.reset { background: #ff7eb6; font-size: 12px; }
   #help { display: none; }
   #status { top: calc(max(8px, env(safe-area-inset-top)) + 44px); white-space: normal; text-align: center; width: max-content; max-width: 92vw; font-size: 13px; padding: 5px 12px; }
   #timer { top: calc(max(8px, env(safe-area-inset-top)) + 80px); font-size: 28px; }
-  #stats { top: auto; bottom: calc(150px + env(safe-area-inset-bottom)); left: 8px; right: auto; font-size: 11px; min-width: 0; padding: 6px 9px; line-height: 1.5; }
+  #stats { top: auto; bottom: calc(150px + env(safe-area-inset-bottom)); left: 66px; right: auto; font-size: 11px; min-width: 0; padding: 6px 9px; line-height: 1.5; }
   body.pip #stats { top: auto; }
   #stats .dim { display: none; }
   #controls { height: 140px; padding: 10px 10px calc(12px + env(safe-area-inset-bottom)); }

@@ -46,7 +46,7 @@ const HOOK = { stemTop: 0.62, apexY: 0.82, apexZ: 0.26, endY: 0.7, endZ: 0.46, t
 const GR = { STATIC: 1, RACK: 2, PRIZE: 4, HEAD: 8, RING: 16, HOOK: 32, SHELF: 64 };
 
 // ---------------------------------------------------------------- 設定・記録
-const DEFAULTS = { marker: true, floorMu: 0.03, chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.75, random: true, pip: true };
+const DEFAULTS = { hard: false, marker: true, floorMu: 0.03, chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.75, random: true, pip: true };
 const savedSettings = localStorage.getItem('ufo-hook-settings');
 const settings = Object.assign({}, DEFAULTS, JSON.parse(savedSettings || '{}'));
 // スマホの初回は重い映り込みをオフにしておく
@@ -68,7 +68,7 @@ delete settings.weight;
 settings.v = 8;
 localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const saveSettings = () => localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
-const statKey = () => `ufo-hook-stats-${settings.mode}-${settings.size}`;
+const statKey = () => `ufo-hook-stats-${settings.mode}-${settings.hard ? 'H' : settings.size}`;
 const loadStats = () => Object.assign({ tries: 0, wins: 0, streak: 0, best: 0 }, JSON.parse(localStorage.getItem(statKey()) || '{}'));
 const saveStats = s => localStorage.setItem(statKey(), JSON.stringify(s));
 
@@ -374,7 +374,7 @@ function buildHook(lay) {
     collisionFilterGroup: GR.HOOK, collisionFilterMask: GR.SHELF | GR.RING | GR.HEAD,
     linearDamping: 0.2,
   });
-  body.quaternion.copy(yawQ(settings.hookYaw));   // バーで設定した向き（縦軸まわり）
+  body.quaternion.copy(yawQ(eff.hookYaw));   // バーで設定した向き（縦軸まわり）
   const P = [V(0, 0.08, 0), V(0, stemTop, 0), V(0, apexY, d * apexZ), V(0, endY, d * endZ), V(0, tipY, d * endZ)];
   body.addShape(new CANNON.Box(V(0.2, 0.04, 0.2)), V(0, 0.04, 0));   // 台座
   for (let i = 0; i < P.length - 1; i++) {
@@ -626,7 +626,7 @@ function placeArm(x, z, L) {
   rope.distance = chainDrop();
   const y = head.position.y - rope.distance;
   shackle.position.set(x, y, z); shackle.velocity.setZero();
-  ring.position.set(x, y - ringR, z); ring.quaternion.copy(yawQ(settings.ringYaw));
+  ring.position.set(x, y - ringR, z); ring.quaternion.copy(yawQ(eff.ringYaw));
   ring.velocity.setZero(); ring.angularVelocity.setZero();
 }
 
@@ -635,6 +635,16 @@ const wireGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), n
 scene.add(new THREE.Line(wireGeo, new THREE.LineBasicMaterial({ color: 0x888888 })));
 const carriageMesh = box(0.8, 0.3, 0.8, M.metal); scene.add(carriageMesh);
 const crossRail = box(0.14, 0.12, RANGE.zMax - RANGE.zMin + 0.8, M.metal); scene.add(crossRail);
+
+// ---------------------------------------------------------------- 難易度「高」
+// リング小・フックとリングの向きは毎回ランダム・揺れやすさ最大・揺れでリングが回るのも最大
+const eff = { hookYaw: 0, ringYaw: 0 };
+const effSwing = () => settings.hard ? 1 : settings.swing;
+const effTwist = () => settings.hard ? 1 : settings.twist;
+function rollAngles() {
+  eff.hookYaw = settings.hard ? Math.round(Math.random() * 72) * 5 - 180 : settings.hookYaw;
+  eff.ringYaw = settings.hard ? Math.round(Math.random() * 72) * 5 - 180 : settings.ringYaw;
+}
 
 // ---------------------------------------------------------------- 落下予測地点（赤い印）
 // 今リングを真下に下ろしたら、リングの一番下が板（または床）に着く位置
@@ -663,6 +673,7 @@ const input = { b1: false, b2: false, stick: { x: 0, z: 0 }, keys: new Set(), dr
 function setState(s) { game.state = s; game.t = 0; game.moved = false; updateUI(); }
 
 function resetRound() {
+  rollAngles();
   detachRing();
   if (round) {
     for (const b of [round.rack, round.hook, round.prize]) unlink(b);
@@ -682,7 +693,7 @@ function resetRound() {
   game.L = L_HOME;
   placeArm(HOME.x, HOME.z, L_HOME);
   game.vel = { x: 0, z: 0 }; game.timer = FREE_TIME; game.won = false; game.finished = false; game.maxTilt = 0;
-  game.catch = null; game.touch = null; game.hookedFrames = 0; game.restYaw = settings.ringYaw * DEG; game.twistDir = Math.random() < 0.5 ? 1 : -1;
+  game.catch = null; game.touch = null; game.hookedFrames = 0; game.restYaw = eff.ringYaw * DEG; game.twistDir = Math.random() < 0.5 ? 1 : -1;
   applyPhysicsSettings();
   hideBanner();
   setState('idle');
@@ -692,12 +703,13 @@ function applyPhysicsSettings() {
   ringShelfCM.friction = settings.floorMu;
   // 向きのバーは待機中ならその場で反映
   if (round && game.state === 'idle') {
-    round.hook.quaternion.copy(yawQ(settings.hookYaw));
-    game.restYaw = settings.ringYaw * DEG;
+    rollAngles();
+    round.hook.quaternion.copy(yawQ(eff.hookYaw));
+    game.restYaw = eff.ringYaw * DEG;
     placeArm(carriage.position.x, carriage.position.z, game.L);
   }
   // 「リングの揺れやすさ」= 空気抵抗・チェーンの摩擦の少なさ
-  if (ring) { ring.angularDamping = 0.5 - 0.47 * settings.swing; ring.linearDamping = 0.45 - 0.43 * settings.swing; }
+  if (ring) { ring.angularDamping = 0.5 - 0.47 * effSwing(); ring.linearDamping = 0.45 - 0.43 * effSwing(); }
 }
 
 const rackTilt = () => round ? 2 * Math.atan2(round.rack.quaternion.z, round.rack.quaternion.w) * 180 / Math.PI : 0;
@@ -933,9 +945,9 @@ function control(dt) {
     ring.angularVelocity.z += (Math.random() - 0.5) * NOISE;
     // 移動中の揺れでチェーンがねじれ、リングの向きが少しずつ回ってしまう（オプション）
     const sp = Math.hypot(game.vel.x, game.vel.z);
-    if (settings.twist > 0) {
+    if (effTwist() > 0) {
       if (sp < 0.05 && Math.random() < dt * 0.5) game.twistDir = Math.random() < 0.5 ? 1 : -1;
-      game.restYaw += settings.twist * dt * sp * (0.18 * game.twistDir + (Math.random() - 0.5) * 0.4);
+      game.restYaw += effTwist() * dt * sp * (0.18 * game.twistDir + (Math.random() - 0.5) * 0.4);
     }
     // チェーンのねじれ剛性: 吊られている間はリングの向きを restYaw に戻そうとする
     const up = ring.quaternion.vmult(V(0, 1, 0));
@@ -1005,7 +1017,7 @@ function renderStats() {
   const s = loadStats();
   const rate = s.tries ? Math.round((s.wins / s.tries) * 100) : 0;
   ui.stats.innerHTML =
-    `<div>${settings.mode === 'fixed' ? '固定ボタン' : 'フリースティック'} / リング<b>${RING_SIZES[settings.size].label}</b></div>` +
+    `<div>${settings.mode === 'fixed' ? '固定ボタン' : 'フリースティック'} / 難易度<b>${settings.hard ? '高' : RING_SIZES[settings.size].label}</b></div>` +
     `<div>挑戦 <b>${s.tries}</b>　成功 <b>${s.wins}</b>　成功率 <b>${rate}%</b></div>` +
     `<div>連続 <b>${s.streak}</b>　最高連続 <b>${s.best}</b></div>` +
     `<div class="dim">視点: ${VIEWS[viewIdx].name}</div>`;
@@ -1024,11 +1036,11 @@ function bindSettings() {
   $('settingsToggle').onclick = () => $('settings').classList.toggle('collapsed');
   if (innerWidth < 700) $('settings').classList.add('collapsed');
   const mode = $('mode'); mode.value = settings.mode;
-  mode.onchange = () => { settings.mode = mode.value; saveSettings(); renderStats(); resetRound(); mode.blur(); };
+  mode.onchange = () => { setMode(mode.value); mode.blur(); };
   for (const r of document.querySelectorAll('input[name=size]')) {
     r.checked = r.value === settings.size;
     r.onchange = () => {
-      setRingSize(r.value); r.blur();
+      settings.hard = false; setRingSize(r.value); r.blur();
     };
   }
   const slider = (id, key, fmt) => {
@@ -1076,14 +1088,34 @@ ui.btnStart.addEventListener('pointerdown', e => { e.preventDefault(); input.sta
 ui.btnDrop.addEventListener('pointerdown', e => { e.preventDefault(); input.drop = true; });
 // リセット：いつでも今のプレイを中断して次の配置へ（記録には数えない）
 // 難易度ボタン: リングの大きさ 大(やさしい) → 中 → 小(むずかしい) を切り替え
+const LEVELS = ['L', 'M', 'S', 'H'];   // 大 → 中 → 小 → 高
+function setLevel(lv) {
+  settings.hard = lv === 'H';
+  setRingSize(lv === 'H' ? 'S' : lv);
+}
+const levelLabel = () => settings.hard ? '高' : RING_SIZES[settings.size].label;
 function setRingSize(size) {
   settings.size = size;
   for (const r of document.querySelectorAll('input[name=size]')) r.checked = r.value === size;
   updateChainRange(); saveSettings(); renderStats(); resetRound();
-  $('btnLevel').innerHTML = `難易度<br><b>${RING_SIZES[size].label}</b>`;
+  $('btnLevel').innerHTML = `難易度<br><b>${levelLabel()}</b>`;
+  $('btnLevel').classList.toggle('hard', settings.hard);
 }
-$('btnLevel').addEventListener('click', e => { e.currentTarget.blur(); setRingSize({ L: 'M', M: 'S', S: 'L' }[settings.size]); });
-$('btnLevel').innerHTML = `難易度<br><b>${RING_SIZES[settings.size].label}</b>`;
+$('btnLevel').addEventListener('click', e => {
+  e.currentTarget.blur();
+  const cur = settings.hard ? 'H' : settings.size;
+  setLevel(LEVELS[(LEVELS.indexOf(cur) + 1) % LEVELS.length]);
+});
+$('btnLevel').innerHTML = `難易度<br><b>${levelLabel()}</b>`;
+$('btnLevel').classList.toggle('hard', settings.hard);
+// 操作モード切替ボタン（左下）: 押すと固定ボタン ⇔ フリースティックを切り替えてリセット
+function setMode(m) {
+  settings.mode = m; $('mode').value = m;
+  $('btnMode').innerHTML = m === 'fixed' ? 'ボタン<br>操作' : 'フリー<br>操作';
+  saveSettings(); renderStats(); resetRound();
+}
+$('btnMode').addEventListener('click', e => { e.currentTarget.blur(); setMode(settings.mode === 'fixed' ? 'free' : 'fixed'); });
+$('btnMode').innerHTML = settings.mode === 'fixed' ? 'ボタン<br>操作' : 'フリー<br>操作';
 $('btnReset').addEventListener('click', e => { e.currentTarget.blur(); resetRound(); });
 $('btnView').addEventListener('click', () => { viewIdx = (viewIdx + 1) % VIEWS.length; applyView(); renderStats(); });
 

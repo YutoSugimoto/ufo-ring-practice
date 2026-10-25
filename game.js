@@ -1115,7 +1115,9 @@ function frame(now) {
   renderer.setViewport(0, 0, W, H);
   renderer.render(scene, camMain);
   if (settings.pip) {
-    const pw = Math.round(Math.min(W * 0.32, 300)), ph = Math.round(pw * 0.75);
+    // スマホ縦持ちは横からの小窓を大きめ・縦長に（奥行き確認用）
+    const mobile = W <= 700;
+    const pw = Math.round(mobile ? W * 0.46 : Math.min(W * 0.32, 300)), ph = Math.round(pw * (mobile ? 1.0 : 0.75));
     // スマホ縦持ちでは小窓を右下（操作ボタンの上）に置く
     const px = W - pw - 8, py = W <= 700 ? 150 : H - ph - 10;
     camPip.aspect = pw / ph; camPip.updateProjectionMatrix();

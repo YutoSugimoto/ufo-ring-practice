@@ -19,7 +19,7 @@ const RANGE = { xMin: -3.2, xMax: 3.3, zMin: -2.5, zMax: 2.3 };
 const CARRIAGE_Y = 14.4;
 const L_HOME = 0.7;
 const MOVE_SPEED = 1.6;               // 16cm/s
-const ACCEL = 30;                     // 実機のガントリーはほぼ急発進・急停止（アーム本体は揺れず、リングだけが振れる）
+const ACCEL = 60;                     // 実機のガントリーはほぼ急発進・急停止（アーム本体は揺れず、リングだけが振れる）
 const DESCEND_SPEED = 1.4;
 const LIFT_SPEED = 1.0;
 const FREE_TIME = 15;
@@ -710,7 +710,8 @@ function applyPhysicsSettings() {
     placeArm(carriage.position.x, carriage.position.z, game.L);
   }
   // 「リングの揺れやすさ」= 空気抵抗・チェーンの摩擦の少なさ
-  if (ring) { ring.angularDamping = 0.5 - 0.47 * effSwing(); ring.linearDamping = 0.45 - 0.43 * effSwing(); }
+  // 揺れが長く続くように空気抵抗は小さめ
+  if (ring) { ring.angularDamping = 0.3 - 0.29 * effSwing(); ring.linearDamping = 0.25 - 0.245 * effSwing(); }
 }
 
 const rackTilt = () => round ? 2 * Math.atan2(round.rack.quaternion.z, round.rack.quaternion.w) * 180 / Math.PI : 0;

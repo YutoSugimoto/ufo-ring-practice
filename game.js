@@ -12,7 +12,7 @@ import { Reflector } from 'three/addons/objects/Reflector.js';
 // ---------------------------------------------------------------- 定数
 const G = 98;
 const DT = 1 / 120;   // 物理の刻み（ヒントの先読み計算も同じ刻みで回すので、軽くするため 120Hz）
-const CAB = { xMin: -4, xMax: 4, zMin: -3, zMax: 3, h: 15.2 };
+const CAB = { xMin: -4, xMax: 4, zMin: -3, zMax: 3, h: 13.2 };
 const CHUTE_X = -2.1;                 // x < CHUTE_X が取り出し口
 const HOME = { x: -3.0, z: 2.2 };     // アームの初期位置（左手前・取り出し口の上）
 const RANGE = { xMin: -3.2, xMax: 3.3, zMin: -2.5, zMax: 2.3 };
@@ -29,8 +29,8 @@ function homePos() {
   const r = moveRange();
   return { x: Math.max(r.xMin, Math.min(r.xMax, HOME.x)), z: Math.max(r.zMin, Math.min(r.zMax, HOME.z)) };
 }
-const CARRIAGE_Y = 14.4;
-const L_HOME = 0.7;
+const CARRIAGE_Y = 12.4;
+const L_HOME = 0.6;
 const SPEEDS = { 0: 1.1, 0.5: 1.6, 1: 2.4 };   // クレーンの移動速度 小 11cm/s・中 16cm/s・大 24cm/s（速いほど止めた時によく揺れる）
 const ACCEL = 60; 
 const JOLT = 0.6;                      // 発進・停止の「ガクッ」でリングに加わる勢い（速度変化の割合）
@@ -167,9 +167,9 @@ scene.fog = new THREE.Fog(0xf3f1f6, 30, 55);
 const camMain = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
 const camPip = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
 const VIEWS = [
-  { name: '正面', pos: [0, 14.6, 24], look: [0, 6.6, 0] },   // 立った目線でやや上から
-  { name: '右横', pos: [22, 9, 0.3], look: [0, 6.2, 0] },
-  { name: '斜め', pos: [13.5, 14, 14.5], look: [0, 5.8, 0], noCorner: true },   // 手前右の柱は描かない（視界の邪魔）
+  { name: '正面', pos: [0, 13.4, 22.5], look: [0, 6.0, 0] },   // 立った目線でやや上から
+  { name: '右横', pos: [21, 8.4, 0.3], look: [0, 5.6, 0] },
+  { name: '斜め', pos: [13, 13, 14], look: [0, 5.3, 0], noCorner: true },   // 手前右の柱は描かない（視界の邪魔）
   { name: '真上', pos: [0, 24, 0.01], look: [0, 0, 0], noRoof: true },
 ];
 let viewIdx = 0;
@@ -734,6 +734,12 @@ const input = { b1: false, b2: false, stick: { x: 0, z: 0 }, keys: new Set(), dr
 
 function setState(s) { game.state = s; game.t = 0; game.moved = false; if (!game.sim) updateUI(); }
 
+function continueRound() {
+  game.timer = FREE_TIME; game.finished = false; game.maxTilt = 0;
+  setState('idle');
+  setTimeout(() => { if (game.state === 'idle' || game.state === 'fixed1' || game.state === 'free') hideBanner(); }, 1400);
+}
+
 function resetRound({ keepLayout = false, shuffle = false } = {}) {
   // やり直し（keepLayout）は向きもそのまま。配置変更（shuffle）は位置・向きともランダム
   if (!keepLayout) { rollAngles(shuffle); game.shuffled = shuffle; }
@@ -901,6 +907,8 @@ function control(dt) {
     }
     case 'result':
       if (!game.finished) { game.finished = true; finishRound(); }
+      // 取れなかった時は配置もリングの揺れもそのままで、すぐ次のプレイへ（戻ってきた揺れを活かして練習できる）
+      if (!game.won) { continueRound(); break; }
       // 結果表示中でも①／START／スティックですぐ次のプレイへ
       if (game.t > 0.3 && (input.b1 || start || drop || Math.hypot(input.stick.x, input.stick.z) > 0.2)) { resetRound(); break; }
       if (game.t > 2.4) resetRound();

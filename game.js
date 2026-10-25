@@ -682,7 +682,7 @@ function resetRound() {
   game.L = L_HOME;
   placeArm(HOME.x, HOME.z, L_HOME);
   game.vel = { x: 0, z: 0 }; game.timer = FREE_TIME; game.won = false; game.finished = false; game.maxTilt = 0;
-  game.catch = null; game.touch = null; game.restYaw = settings.ringYaw * DEG; game.twistDir = Math.random() < 0.5 ? 1 : -1;
+  game.catch = null; game.touch = null; game.hookedFrames = 0; game.restYaw = settings.ringYaw * DEG; game.twistDir = Math.random() < 0.5 ? 1 : -1;
   applyPhysicsSettings();
   hideBanner();
   setState('idle');
@@ -859,14 +859,12 @@ function control(dt) {
       game.L = Math.max(L_HOME, game.L - LIFT_SPEED * dt);
       // 掛かり判定は引き上げ中だけ: フックがリングの穴を通っていて、しかもリングが実際にフックに
       // 引っ掛かって（接触して）引っ張っているときに初めて「掛かった」とする。見た目で掛かっていないものは取れない
-      if (!game.catch && (game.lastJudge?.s ?? -1) >= 0.05) {
-        // フックがリングを「下向きに」押している接触（＝アーチの下側に引っ掛かって上がれない）があること
-        const pulled = world.contacts.some(c => {
-          if (!((c.bi === ring && c.bj === round.hook) || (c.bj === ring && c.bi === round.hook))) return false;
-          const ny = c.bi === ring ? -c.ni.y : c.ni.y;   // リングが受ける力の向き
-          return ny < -0.3;
-        });
-        const th = pulled ? threadTest(ringLowest().n, true) : null;
+      if (!game.catch) {
+        // フックに触れていて、フックがリングの穴を通り、リングの一番下がアーチより下にある状態が続いたら掛かり
+        const touching = world.contacts.some(c => (c.bi === ring && c.bj === round.hook) || (c.bj === ring && c.bi === round.hook));
+        const ok = touching && ringLowest().p.y - SHELF.topY < HOOK.apexY + 0.05 && threadTest(ringLowest().n, true);
+        game.hookedFrames = ok ? (game.hookedFrames || 0) + 1 : 0;
+        const th = game.hookedFrames >= 4 ? ok : null;
         if (th) { game.catch = { deep: true, slipTilt: 90 }; attachRing(game.catch); }
       }
       // 網台が上限まで上がったらそこで上昇停止（チェーンが張ってアームが止まる）

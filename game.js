@@ -29,6 +29,8 @@ const TUBE = 0.055;
 
 const HEAD_HY = 0.26;
 const ARM_STOP = 2.4;                  // アーム（チェーンの支点）が下りる高さ＝板から 24cm（固定）。届き方はチェーンの長さで調整
+// 既定のチェーン長: 下降しきったとき、まっすぐ垂れたリングの下端が板から 2cm 浮く長さ（リングの大きさで変わる）
+const defaultChain = size => +(ARM_STOP - HEAD_HY - 2 * RING_SIZES[size].R - 0.2).toFixed(2);
 const chainDrop = () => HEAD_HY + settings.chain;    // ヘッド中心からリング上端まで
 let NOISE = 0.02;
 
@@ -48,13 +50,15 @@ if (!savedSettings && matchMedia('(pointer: coarse)').matches) settings.reflect 
 //  v2: 既定のリング・フックを 90°、揺れやすさを少し上げた
 //  v4: チェーン既定 30cm（下ろしたときにリングが板の上を滑って傾く動きが大事）
 //  v5: リングの揺れやすさの既定を「大」に
+//  v6: チェーンの既定 = 下降時にリング下端が板から 2cm 浮く長さ
 if (savedSettings && (settings.v ?? 1) < 5) {
   if ((settings.v ?? 1) < 2) Object.assign(settings, { hookYaw: DEFAULTS.hookYaw, ringYaw: DEFAULTS.ringYaw });
   if ((settings.v ?? 1) < 4) settings.chain = Math.max(settings.chain, DEFAULTS.chain);
   settings.swing = Math.max(settings.swing, DEFAULTS.swing);
 }
 delete settings.armStop;
-settings.v = 5;
+if (!savedSettings || (settings.v ?? 1) < 6) settings.chain = defaultChain(settings.size);
+settings.v = 6;
 localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const saveSettings = () => localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const statKey = () => `ufo-hook-stats-${settings.mode}-${settings.size}`;
@@ -952,7 +956,12 @@ function bindSettings() {
   mode.onchange = () => { settings.mode = mode.value; saveSettings(); renderStats(); resetRound(); mode.blur(); };
   for (const r of document.querySelectorAll('input[name=size]')) {
     r.checked = r.value === settings.size;
-    r.onchange = () => { settings.size = r.value; saveSettings(); renderStats(); resetRound(); r.blur(); };
+    r.onchange = () => {
+      settings.size = r.value;
+      settings.chain = defaultChain(settings.size);   // リングを変えたらチェーンも既定の長さに戻す
+      $('chain').value = settings.chain; $('chainVal').textContent = `${Math.round(settings.chain * 10)} cm`;
+      saveSettings(); renderStats(); resetRound(); r.blur();
+    };
   }
   const slider = (id, key, fmt) => {
     const el = $(id), out = $(id + 'Val');

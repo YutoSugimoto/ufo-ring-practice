@@ -63,11 +63,11 @@ const GR = { STATIC: 1, RACK: 2, PRIZE: 4, HEAD: 8, RING: 16, HOOK: 32, SHELF: 6
 // 床（アクリル板）とリングの摩擦。cannon-es の摩擦は「μ×重力×質量」を接触点ごとの上限にする近似で、
 // 実際の垂直抗力を使わない（リングは小球の集まりなので寝ると接触点の数だけ摩擦が増えて全く動かなくなる）。
 // そのためエンジンの摩擦は 0 にして、接触の垂直抗力から静止摩擦・動摩擦を自前で計算する（applyRingFloorFriction）
-const FLOOR_MU = { defaultKinetic: 0.12, staticRatio: 1.35, staticExtra: 0.02, stickSpeed: 0.04 };
+const FLOOR_MU = { defaultKinetic: 0.3, staticRatio: 1.35, staticExtra: 0.02, stickSpeed: 0.04 };
 const floorMuS = () => settings.floorMuK * FLOOR_MU.staticRatio + FLOOR_MU.staticExtra;
 
 // ---------------------------------------------------------------- 設定・記録
-const DEFAULTS = { speed: 0.5, difficulty: 'normal', marker: true, floorMuK: FLOOR_MU.defaultKinetic, chain: DEFAULT_CHAIN, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'front', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.9, random: true, pip: true };
+const DEFAULTS = { speed: 0.5, difficulty: 'normal', marker: true, floorMuK: FLOOR_MU.defaultKinetic, chain: DEFAULT_CHAIN, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'front', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.25, random: true, pip: true };
 const savedSettings = localStorage.getItem('ufo-hook-settings');
 const storedSettings = JSON.parse(savedSettings || '{}') || {};
 const settings = Object.assign({}, DEFAULTS, storedSettings);
@@ -100,7 +100,8 @@ if ((storedSettings.v ?? 1) < 18) { settings.hookDir = 'front'; settings.hookYaw
 if ((storedSettings.v ?? 1) < 19) { settings.reflect = true; if (!(settings.twist > 0)) settings.twist = 0.5; }   // v19: 映り込みオン・揺れでリングが回るを中で既定オン
 delete settings.hint;   // ヒントモードは廃止
 if (savedSettings && (storedSettings.v ?? 1) < 21) { settings.chain = Math.max(settings.chain, DEFAULT_CHAIN); settings.swing = Math.max(settings.swing, DEFAULTS.swing); }   // v21: もっと揺れる既定に
-settings.v = 21;
+if (savedSettings && (storedSettings.v ?? 1) < 22) { settings.floorMuK = DEFAULTS.floorMuK; settings.swing = DEFAULTS.swing; }   // v22: 床 μ=0.3・揺れやすさ小
+settings.v = 22;
 localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const saveSettings = () => localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const statKey = () => {
@@ -688,7 +689,6 @@ const swingResponse = value => {
   return 1 - (1 - v) ** 2;
 };
 const effSwing = () => isHighDifficulty() ? 1 : swingResponse(isEasyDifficulty() ? Math.min(settings.swing, 0.35) : settings.swing);
-const effSwingKick = () => 0.4 + 0.6 * effSwing();   // 揺れやすさが低いとガクッも弱い
 const effTwist = () => isHighDifficulty() ? 1 : isEasyDifficulty() ? 0 : settings.twist;
 // 向き: 通常は設定値（既定 90°）。難易度「大」か「配置変更」ボタンを押したラウンドはランダム
 const randomYaw = () => Math.round(Math.random() * 72) * 5 - 180;
@@ -928,7 +928,7 @@ function control(dt) {
     // 実機のガントリーは動き出し・止まりで「ガクッ」と揺れ、リングに余分な勢いが乗る。
     // 速度の変化と逆向き（慣性の向き）にリングと付け根を少し押す
     if (ring && Math.abs(step) > 1e-6 && !['descend', 'bottom', 'lift', 'hold'].includes(game.state)) {
-      const jolt = -step * JOLT * effSwingKick();
+      const jolt = -step * JOLT;   // 揺れやすさの設定に関係なくガクッは入れる
       ring.velocity[k] += jolt; shackle.velocity[k] += jolt;
     }
   }

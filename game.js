@@ -786,7 +786,8 @@ function threadTest(n, hanging = false) {
   if (c.vsub(pts[0]).dot(od) < 0.05) return null;
   // フックの上に乗っている（めり込んでいる）だけのリングは掛かっていない: 輪の最下点がアーチより下まで下りていること
   if (!hanging && ringLowest().p.y - SHELF.topY > HOOK.tipY + 0.05) return null;   // 先端より下まで潜っていること（引っ掛かって吊られている時は除く）
-  for (let i = 0; i < pts.length - 1; i++) {
+  // 柱（根元）は数えない: 根元にめり込んだだけのリングを掛かりにしないため。アーチ〜先端が穴を通っていること
+  for (let i = 1; i < pts.length - 1; i++) {
     const a = pts[i], b = pts[i + 1];
     const da = a.vsub(c).dot(n), db = b.vsub(c).dot(n);
     if (da * db > 0) continue;
@@ -872,7 +873,8 @@ function control(dt) {
       game.L = Math.max(L_HOME, game.L - LIFT_SPEED * dt);
       // 掛かり判定は引き上げ中だけ: フックがリングの穴を通っていて、しかもリングが実際にフックに
       // 引っ掛かって（接触して）引っ張っているときに初めて「掛かった」とする。見た目で掛かっていないものは取れない
-      if (!game.catch) {
+      // 下降停止の時点でリングがフックの開いている側にあったときだけ（裏側からのめり込みは掛からない）
+      if (!game.catch && (game.lastJudge?.s ?? -1) >= 0.05) {
         // フックに触れていて、フックがリングの穴を通り、リングの一番下がアーチより下にある状態が続いたら掛かり
         const touching = world.contacts.some(c => (c.bi === ring && c.bj === round.hook) || (c.bj === ring && c.bi === round.hook));
         const ok = touching && ringLowest().p.y - SHELF.topY < HOOK.apexY + 0.05 && threadTest(ringLowest().n, true);

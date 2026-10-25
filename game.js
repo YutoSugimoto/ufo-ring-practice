@@ -22,6 +22,7 @@ const SPEEDS = { 0: 1.1, 0.5: 1.6, 1: 2.4 };   // クレーンの移動速度 �
 const ACCEL = 60;                     // 実機のガントリーはほぼ急発進・急停止（アーム本体は揺れず、リングだけが振れる）
 const DESCEND_SPEED = 1.4;
 const LIFT_SPEED = 1.0;
+const BOTTOM_HOLD = 1.2;             // 下降停止後、引き上げまでの待ち時間
 const FREE_TIME = 15;
 
 const RING_SIZES = { L: { R: 0.8, label: '大' }, M: { R: 0.6, label: '中' }, S: { R: 0.45, label: '小' } };
@@ -46,9 +47,15 @@ const HOOK = { stemTop: 0.62, apexY: 0.82, apexZ: 0.26, endY: 0.7, endZ: 0.46, t
 const GR = { STATIC: 1, RACK: 2, PRIZE: 4, HEAD: 8, RING: 16, HOOK: 32, SHELF: 64 };
 
 // ---------------------------------------------------------------- 設定・記録
-const DEFAULTS = { speed: 0.5, hard: false, marker: true, floorMu: 0.03, chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.75, random: true, pip: true };
+const DEFAULTS = { speed: 0.5, difficulty: 'normal', marker: true, floorMu: 0.01, chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.85, random: true, pip: true };
 const savedSettings = localStorage.getItem('ufo-hook-settings');
-const settings = Object.assign({}, DEFAULTS, JSON.parse(savedSettings || '{}'));
+const storedSettings = JSON.parse(savedSettings || '{}') || {};
+const settings = Object.assign({}, DEFAULTS, storedSettings);
+if (!['high', 'normal', 'easy'].includes(storedSettings.difficulty)) {
+  // 旧版はリングサイズ L が高難易度を兼ねていたため、その状態だけ引き継ぐ
+  settings.difficulty = storedSettings.size === 'L' || storedSettings.hard ? 'high' : 'normal';
+}
+delete settings.captureModel;
 // スマホの初回は重い映り込みをオフにしておく
 if (!savedSettings && matchMedia('(pointer: coarse)').matches) settings.reflect = false;
 // 保存済み設定の移行
@@ -64,12 +71,18 @@ if (savedSettings && (settings.v ?? 1) < 5) {
 delete settings.armStop;
 if ((settings.v ?? 1) < 7) settings.chain = DEFAULT_CHAIN;
 if ((settings.v ?? 1) < 8 && !settings.twist) settings.twist = DEFAULTS.twist;   // v8: 揺れでリングが回るを既定でオン   // v7: チェーン既定 22cm・下降位置はリングが 2cm 浮く高さ
+if (savedSettings && (settings.v ?? 1) < 10 && settings.floorMu === 0.03) settings.floorMu = DEFAULTS.floorMu; // v10: 旧既定の床摩擦を更新
+if (savedSettings && (settings.v ?? 1) < 12 && settings.swing === 0.75) settings.swing = DEFAULTS.swing; // v12: 旧既定の揺れを少し大きく
 delete settings.weight;
-settings.hard = settings.size === 'L';
-settings.v = 8;
+delete settings.hard;
+settings.v = 13;
 localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const saveSettings = () => localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
-const statKey = () => `ufo-hook-stats-${settings.mode}-${settings.size}`;
+const statKey = () => {
+  const legacyDifficulty = settings.size === 'L' ? 'high' : 'normal';
+  const difficultyKey = settings.difficulty === legacyDifficulty ? '' : `-difficulty-${settings.difficulty}`;
+  return `ufo-hook-stats-${settings.mode}-${settings.size}${difficultyKey}-physical`;
+};
 const loadStats = () => Object.assign({ tries: 0, wins: 0, streak: 0, best: 0 }, JSON.parse(localStorage.getItem(statKey()) || '{}'));
 const saveStats = s => localStorage.setItem(statKey(), JSON.stringify(s));
 
@@ -93,7 +106,7 @@ const cm = (a, b, friction, restitution = 0.05) =>
   world.addContactMaterial(new CANNON.ContactMaterial(a, b, { friction, restitution }));
 cm(mat.prize, mat.rack, 0.12);
 cm(mat.prize, mat.stat, 0.45);
-cm(mat.ring, mat.hook, 0.02, 0);   // フックの表面はよく滑る（上に乗ったリングは滑り落ちる）
+world.addContactMaterial(new CANNON.ContactMaterial(mat.ring, mat.hook, { friction: 0, restitution: 0 }));
 // アクリル板とリングの摩擦（設定「床の滑りやすさ」で切り替え）。既定はよく滑る:
 // 着地後、リングの付け根（チェーンの支点）は落ちた位置から動かず、板に着いた先端側が滑って倒れる
 const ringShelfCM = new CANNON.ContactMaterial(mat.ring, mat.shelf, { friction: 0.03, restitution: 0 });
@@ -538,10 +551,10 @@ function buildPlush(t) {
 }
 
 // 景品「おすがた」フィギュア
-function buildPrize() {
+function buildPrize(prizeZ) {
   const body = new CANNON.Body({
     mass: 0.8, material: mat.prize,
-    position: V(-1.3, RACK.topY + 0.62, settings.random ? (Math.random() * 2 - 1) * 0.3 : 0),
+    position: V(-1.3, RACK.topY + 0.62, prizeZ),
     collisionFilterGroup: GR.PRIZE, collisionFilterMask: GR.STATIC | GR.RACK | GR.PRIZE | GR.HEAD | GR.RING | GR.SHELF,
     angularDamping: 0.1,
   });
@@ -638,13 +651,15 @@ const carriageMesh = box(0.8, 0.3, 0.8, M.metal); scene.add(carriageMesh);
 const crossRail = box(0.14, 0.12, RANGE.zMax - RANGE.zMin + 0.8, M.metal); scene.add(crossRail);
 
 // ---------------------------------------------------------------- 難易度「高」
-// リング最大・クレーン速度大・フックとリングの向きは毎回ランダム・揺れやすさ最大・揺れでリングが回るのも最大・落下予測の赤い点なし
+// 難易度はリングサイズと独立。大=高（ランダム向き・速い・揺れ最大）、中=設定値、小=遅い・揺れ控えめ
 const eff = { hookYaw: 0, ringYaw: 0 };
-const effSwing = () => settings.hard ? 1 : settings.swing;
-const effTwist = () => settings.hard ? 1 : settings.twist;
+const isHighDifficulty = () => settings.difficulty === 'high';
+const isEasyDifficulty = () => settings.difficulty === 'easy';
+const effSwing = () => isHighDifficulty() ? 1 : isEasyDifficulty() ? Math.min(settings.swing, 0.35) : settings.swing;
+const effTwist = () => isHighDifficulty() ? 1 : isEasyDifficulty() ? 0 : settings.twist;
 function rollAngles() {
-  eff.hookYaw = settings.hard ? Math.round(Math.random() * 72) * 5 - 180 : settings.hookYaw;
-  eff.ringYaw = settings.hard ? Math.round(Math.random() * 72) * 5 - 180 : settings.ringYaw;
+  eff.hookYaw = isHighDifficulty() ? Math.round(Math.random() * 72) * 5 - 180 : settings.hookYaw;
+  eff.ringYaw = isHighDifficulty() ? Math.round(Math.random() * 72) * 5 - 180 : settings.ringYaw;
 }
 
 // ---------------------------------------------------------------- 落下予測地点（赤い印）
@@ -657,7 +672,7 @@ const marker = new THREE.Group();
   scene.add(marker);
 }
 function updateMarker() {
-  marker.visible = !!(settings.marker && !settings.hard && ring && ['idle', 'fixed1', 'fixed2', 'free', 'wait', 'descend'].includes(game.state));
+  marker.visible = !!(settings.marker && !isHighDifficulty() && ring && ['idle', 'fixed1', 'fixed2', 'free', 'wait', 'descend'].includes(game.state));
   if (!marker.visible) return;
   const p = ringLowest().p;
   const onShelf = p.x > SHELF.xMin && p.x < SHELF.xMax && p.z > SHELF.zMin && p.z < SHELF.zMax;
@@ -667,23 +682,23 @@ function updateMarker() {
 // ---------------------------------------------------------------- ゲーム状態
 const game = {
   state: 'idle', t: 0, L: L_HOME,
-  vel: { x: 0, z: 0 }, moved: false, timer: FREE_TIME, won: false, finished: false, Ltarget: 3, maxTilt: 0, catch: null, twistDir: 1,
+  vel: { x: 0, z: 0 }, moved: false, timer: FREE_TIME, won: false, finished: false, Ltarget: 3, maxTilt: 0, twistDir: 1,
 };
 const input = { b1: false, b2: false, stick: { x: 0, z: 0 }, keys: new Set(), drop: false, start: false };
 
 function setState(s) { game.state = s; game.t = 0; game.moved = false; updateUI(); }
 
-function resetRound() {
+function resetRound({ keepLayout = false } = {}) {
   rollAngles();
-  detachRing();
   if (round) {
     for (const b of [round.rack, round.hook, round.prize]) unlink(b);
     scene.remove(round.chain);
   }
-  const lay = randomLayout();
+  const lay = keepLayout && round ? { ...round.lay } : randomLayout();
+  lay.prizeZ ??= settings.random ? (Math.random() * 2 - 1) * 0.3 : 0;
   const rack = buildRack(lay);
   const hook = buildHook(lay);
-  const prize = buildPrize();
+  const prize = buildPrize(lay.prizeZ);
   round = { rack: rack.body, attachLocal: rack.attachLocal, hook, chain: makeChainMesh(16, M.gold), prize, lay, theta: 0 };
 
   buildRing();
@@ -694,7 +709,7 @@ function resetRound() {
   game.L = L_HOME;
   placeArm(HOME.x, HOME.z, L_HOME);
   game.vel = { x: 0, z: 0 }; game.timer = FREE_TIME; game.won = false; game.finished = false; game.maxTilt = 0;
-  game.catch = null; game.touch = null; game.hookedFrames = 0; game.restYaw = eff.ringYaw * DEG; game.twistDir = Math.random() < 0.5 ? 1 : -1;
+  game.restYaw = eff.ringYaw * DEG; game.twistDir = Math.random() < 0.5 ? 1 : -1;
   applyPhysicsSettings();
   hideBanner();
   setState('idle');
@@ -716,12 +731,6 @@ function applyPhysicsSettings() {
 
 const rackTilt = () => round ? 2 * Math.atan2(round.rack.quaternion.z, round.rack.quaternion.w) * 180 / Math.PI : 0;
 
-// ---------------------------------------------------------------- 掛かり判定
-// 下降停止の時点でリングがどこにいるか（揺れ・倒れ込みを含めた物理の結果）から判定する。
-//  ・フックの横棒がリングの穴の幅に入っている（左右のズレ）
-//  ・リング下端が先端より下まで下りている（下降停止が早すぎない／フックの上に乗っていない）
-//  ・リング下端がフックの「開いている側」の、先端のすぐ外側にある（滑り込める距離）
-// 先端に近いほど深く掛かり、ギリギリだと浅く掛かって途中で外れやすい。
 // リングの最下点（傾いていても輪の一番低いところ）
 function ringLowest() {
   const n = ring.quaternion.vmult(V(0, 0, 1));
@@ -730,104 +739,6 @@ function ringLowest() {
   down.normalize();
   return { p: ring.position.vadd(down.scale(ringR)), n };
 }
-// リングが最初にアクリル板（またはフック）に触れた瞬間の揺れの速度を記録する
-function trackTouchdown() {
-  if (!ring || game.touch || !['descend', 'bottom'].includes(game.state)) return;
-  // リング下端がフックの高さまで下りてきた瞬間の速度（＝フックに差しかかる時の振れ）
-  if (ringLowest().p.y - SHELF.topY < HOOK.apexY) game.touch = { v: ring.velocity.clone() };
-}
-
-function judgeCatch() {
-  const { lay } = round, d = lay.dir, R = ringR;
-  const { p: bot, n } = ringLowest();
-  const up = ring.quaternion.vmult(V(0, 1, 0));
-  const h = bot.y - SHELF.topY;
-  // フックの開いている向き（水平）とそれに直交する向き
-  const od = round.hook.quaternion.vmult(V(0, 0, d));
-  const perp = V(od.z, 0, -od.x);
-  const rel = V(bot.x - lay.x, 0, bot.z - lay.z);
-  // 柱から開いている側への距離。リングが傾いていても、先端の高さでリング面がどこにあるかで測る
-  const p0 = V(lay.x, SHELF.topY + (HOOK.tipY + HOOK.endY) / 2, lay.z);
-  const odn = od.dot(n);
-  const s = Math.abs(odn) > 0.2 ? ring.position.vsub(p0).dot(n) / odn : rel.dot(od);
-  const lat = rel.dot(perp);                       // 左右のズレ
-  // 横棒がリングの穴を貫く角度。リング面とフックの向きがずれるほど穴が実質せまくなる
-  const cross = Math.abs(od.dot(n));
-  const halfChord = (Math.sqrt(Math.max(0, R * R - (R - 0.55) ** 2)) - TUBE - 0.05) * cross;
-  const lean = up.dot(od);                         // >0: 上端がフックと反対側へ倒れている
-  // 着地した瞬間の揺れ: フックの穴へ向かって振れていれば（vin>0）先端の下へ「ポンっ」と入りやすい
-  const tv = game.touch?.v ?? ring.velocity;
-  const vin = -(tv.x * od.x + tv.z * od.z);
-  const thread = threadTest(n);
-  const info = { s, h, lat, cross, halfChord, vin, thread: thread ? (thread.deep ? 2 : 1) : 0 };
-  game.lastJudge = info;
-  // ① フックがすでにリングの穴を貫いている（肩越しに掛かっている・振れて潜り込んだ）
-  if (thread) return { deep: thread.deep, slipTilt: 14 + Math.random() * 24 };
-  // ② リングが先端のすぐ外側に立っていて、引き上げ時に先端の下へ滑り込む
-  if (cross < 0.45) return null;                                  // リングの向きがフックと合っていない
-  if (Math.abs(lat) > halfChord) return null;                     // 左右がズレている
-  if (h > HOOK.tipY + 0.12) return null;                          // 下りきっていない・フックの上に乗った
-  if (up.y < 0.5 && lean > 0) return null;                        // 外側へ寝てしまった
-  const lo = HOOK.endZ + 0.03;
-  let hi = HOOK.endZ + 0.1 + 0.3 * R;
-  hi += vin > 0 ? Math.min(0.06, 0.03 * vin) : Math.max(-0.12, 0.05 * vin);   // 振れの向きで届く範囲が変わる
-  if (s < HOOK.apexZ || s > hi) return null;                      // 柱側すぎる／離れすぎ
-  const deep = s < lo + Math.max(0, hi - lo) * (0.55 + Math.max(-0.3, Math.min(0.3, 0.1 * vin)));
-  return { deep, slipTilt: 14 + Math.random() * 24 };
-}
-
-// フック（柱→アーチ→先端）のどこかがリング面を「穴の内側」で貫いているか
-function threadTest(n, hanging = false) {
-  const { hook, lay } = round, d = lay.dir, H = HOOK;
-  const pts = [V(0, -0.1, 0), V(0, H.stemTop, 0), V(0, H.apexY, d * H.apexZ), V(0, H.endY, d * H.endZ), V(0, H.tipY, d * H.endZ)]
-    .map(p => hook.pointToWorldFrame(p));
-  const c = ring.position, inner = ringR - TUBE - HOOK.w - 0.07;
-  // フックの穴は開いている側からしか入れない。反対側（柱の裏）から被さったリングは掛からない
-  const od = hook.quaternion.vmult(V(0, 0, d));
-  if (c.vsub(pts[0]).dot(od) < 0.05) return null;
-  // フックの上に乗っている（めり込んでいる）だけのリングは掛かっていない: 輪の最下点がアーチより下まで下りていること
-  if (!hanging && ringLowest().p.y - SHELF.topY > HOOK.tipY + 0.05) return null;   // 先端より下まで潜っていること（引っ掛かって吊られている時は除く）
-  // 柱（根元）は数えない: 根元にめり込んだだけのリングを掛かりにしないため。アーチ〜先端が穴を通っていること
-  for (let i = 1; i < pts.length - 1; i++) {
-    const a = pts[i], b = pts[i + 1];
-    const da = a.vsub(c).dot(n), db = b.vsub(c).dot(n);
-    if (da * db > 0) continue;
-    const t = da / (da - db);
-    const x = a.vadd(b.vsub(a).scale(t));
-    if (x.vsub(c).length() < inner) return { deep: i <= 1, seg: i };   // 柱・アーチ前半なら深く掛かる
-  }
-  return null;
-}
-
-// 掛かったリングをフックのアーチ内側へ滑り込ませてつなぐ
-function attachRing(c) {
-  const { hook, lay } = round;
-  c.target = V(0, HOOK.apexY - HOOK.w - TUBE, lay.dir * (HOOK.apexZ + HOOK.endZ) / 2);
-  // リングの輪のうち、フックのアーチに一番近い点を掛かる点にする（倒れたリングでも自然に）
-  const q = ring.pointToLocalFrame(hook.pointToWorldFrame(c.target));
-  q.z = 0;
-  if (q.length() < 1e-3) q.set(0, -1, 0);
-  q.normalize();
-  const pr = q.scale(ringR - TUBE);
-  const hp = hook.pointToLocalFrame(ring.pointToWorldFrame(pr));
-  c.joint = new CANNON.PointToPointConstraint(ring, pr, hook, hp);
-  world.addConstraint(c.joint);
-  ring.collisionFilterMask &= ~GR.HOOK;
-  shackle.collisionFilterMask = GR.SHELF;
-}
-function detachRing() {
-  if (!game.catch?.joint) return;
-  world.removeConstraint(game.catch.joint);
-  game.catch.joint = null;
-}
-function updateCatch(dt) {
-  const j = game.catch?.joint;
-  if (!j) return;
-  // 0.4 秒ほどでアーチの内側まで滑り込む
-  const p = j.pivotB, t = game.catch.target, k = Math.min(1, dt / 0.15);
-  p.x += (t.x - p.x) * k; p.y += (t.y - p.y) * k; p.z += (t.z - p.z) * k;
-}
-
 // ---------------------------------------------------------------- 制御（物理 1 ステップごと）
 function control(dt) {
   game.t += dt;
@@ -863,31 +774,18 @@ function control(dt) {
       if (game.L >= game.Ltarget || (settings.mode === 'free' && drop && game.t > 0.1)) setState('bottom');
       break;
     }
-    case 'bottom':    // 下降停止 → 一瞬止まってから上昇
-      if (game.t > 0.6) {
-        judgeCatch();   // 位置情報の記録だけ（掛かったかどうかは引き上げ中の実際の接触で決める）
-        game.catch = null;
+    case 'bottom':    // 下降停止 → 少し間をおいてから上昇
+      if (game.t > BOTTOM_HOLD) {
         setState('lift');
       }
       break;
     case 'lift':
       game.L = Math.max(L_HOME, game.L - LIFT_SPEED * dt);
-      // 掛かり判定は引き上げ中だけ: フックがリングの穴を通っていて、しかもリングが実際にフックに
-      // 引っ掛かって（接触して）引っ張っているときに初めて「掛かった」とする。見た目で掛かっていないものは取れない
-      // 下降停止の時点でリングがフックの開いている側にあったときだけ（裏側からのめり込みは掛からない）
-      if (!game.catch && (game.lastJudge?.s ?? -1) >= 0.05) {
-        // フックに触れていて、フックがリングの穴を通り、リングの一番下がアーチより下にある状態が続いたら掛かり
-        const touching = world.contacts.some(c => (c.bi === ring && c.bj === round.hook) || (c.bj === ring && c.bi === round.hook));
-        const ok = touching && ringLowest().p.y - SHELF.topY < HOOK.apexY + 0.05 && threadTest(ringLowest().n, true);
-        game.hookedFrames = ok ? (game.hookedFrames || 0) + 1 : 0;
-        const th = game.hookedFrames >= 4 ? ok : null;
-        if (th) { game.catch = { deep: true, slipTilt: 90 }; attachRing(game.catch); }
-      }
       // 網台が上限まで上がったらそこで上昇停止（チェーンが張ってアームが止まる）
       if (game.L <= L_HOME || round.theta >= MAX_TILT - 1e-3) setState('hold');
       break;
     case 'hold':
-      if (game.t > 1.8) { detachRing(); setState('return'); }   // リングが外れて網台が戻る
+      if (game.t > 1.8) setState('return');   // リングが外れて網台が戻る
       break;
     case 'return': {
       const dx = HOME.x - cx, dz = HOME.z - cz;
@@ -906,7 +804,8 @@ function control(dt) {
 
   // キャリッジ（ガントリー）の移動。急停止すると吊られたアームとリングが振り子のように揺れる
   for (const k of ['x', 'z']) {
-    const target = (want[k] || 0) * SPEEDS[settings.hard ? 1 : settings.speed];
+    const targetSpeed = isHighDifficulty() ? 1 : isEasyDifficulty() ? 0 : settings.speed;
+    const target = (want[k] || 0) * SPEEDS[targetSpeed];
     const dv = target - game.vel[k];
     game.vel[k] += Math.max(-ACCEL * dt, Math.min(ACCEL * dt, dv));
   }
@@ -920,21 +819,7 @@ function control(dt) {
   const ty = CARRIAGE_Y - game.L;
   head.velocity.set(vx, (ty - head.position.y) / dt, vz);
   head.position.x = cx; head.position.z = cz;
-  trackTouchdown();
   updateRack(dt);
-  updateCatch(dt);
-  // フックの上に乗ったリングは丸いフック表面を滑り落ちる（物理エンジンの静止摩擦で止まりやすいので補う）
-  if (ring && round && !game.catch?.joint && ringLowest().p.y - SHELF.topY > HOOK.tipY + 0.1) {
-    const touching = world.contacts.some(c => (c.bi === ring && c.bj === round.hook) || (c.bj === ring && c.bi === round.hook));
-    if (touching) {
-      const apex = round.hook.pointToWorldFrame(V(0, HOOK.apexY, round.lay.dir * HOOK.apexZ));
-      let dx = ring.position.x - apex.x, dz = ring.position.z - apex.z;
-      const len = Math.hypot(dx, dz) || 1;
-      if (len < 0.02) { const a = Math.random() * Math.PI * 2; dx = Math.cos(a); dz = Math.sin(a); }
-      const f = ring.mass * G * 1.2;
-      ring.force.x += f * dx / len; ring.force.z += f * dz / len;
-    }
-  }
   // 下ろしてチェーンがたるんだら、リングの付け根はアームの真下（落ちた位置）に留まる
   if (['descend', 'bottom'].includes(game.state) && head.position.distanceTo(shackle.position) < rope.distance - 0.03) {
     // 位置を直接動かすとフックをすり抜けるので、速度で落ちた位置へ寄せる（フックに当たればそこで止まる）
@@ -955,7 +840,7 @@ function control(dt) {
     }
     // チェーンのねじれ剛性: 吊られている間はリングの向きを restYaw に戻そうとする
     const up = ring.quaternion.vmult(V(0, 1, 0));
-    if (up.y > 0.7 && !game.catch?.joint) {
+    if (up.y > 0.7) {
       const f = ring.quaternion.vmult(V(0, 0, 1));
       let err = Math.atan2(f.x, f.z) - game.restYaw;
       err = Math.atan2(Math.sin(err), Math.cos(err));
@@ -1021,7 +906,8 @@ function renderStats() {
   const s = loadStats();
   const rate = s.tries ? Math.round((s.wins / s.tries) * 100) : 0;
   ui.stats.innerHTML =
-    `<div>${settings.mode === 'fixed' ? '固定ボタン' : 'フリースティック'} / 難易度<b>${RING_SIZES[settings.size].label}</b></div>` +
+    `<div>${settings.mode === 'fixed' ? '固定ボタン' : 'フリースティック'} / 難易度<b>${difficultyLabel()}</b> / リング<b>${RING_SIZES[settings.size].label}</b></div>` +
+    `<div class="dim">物理版</div>` +
     `<div>挑戦 <b>${s.tries}</b>　成功 <b>${s.wins}</b>　成功率 <b>${rate}%</b></div>` +
     `<div>連続 <b>${s.streak}</b>　最高連続 <b>${s.best}</b></div>` +
     `<div class="dim">視点: ${VIEWS[viewIdx].name}</div>`;
@@ -1091,28 +977,33 @@ holdButton(ui.btn1);
 holdButton(ui.btn2);
 ui.btnStart.addEventListener('pointerdown', e => { e.preventDefault(); input.start = true; });
 ui.btnDrop.addEventListener('pointerdown', e => { e.preventDefault(); input.drop = true; });
-// リセット：いつでも今のプレイを中断して次の配置へ（記録には数えない）
-// 難易度ボタン: リングの大きさ 大(やさしい) → 中 → 小(むずかしい) を切り替え
-const LEVELS = ['L', 'M', 'S'];   // 大（＝高難易度モード）→ 中 → 小
-function setLevel(lv) {
-  setRingSize(lv);
+// リセットは現在の配置を保ってやり直す。「次へ」は新しい配置（記録には数えない）
+// 難易度ボタン: 大（高）→ 中（設定値）→ 小（易）を切り替え
+const DIFFICULTIES = [
+  { value: 'high', label: '大' },
+  { value: 'normal', label: '中' },
+  { value: 'easy', label: '小' },
+];
+const difficultyLabel = () => DIFFICULTIES.find(level => level.value === settings.difficulty)?.label ?? '中';
+function refreshDifficultyButton() {
+  $('btnLevel').innerHTML = `難易度<br><b>${difficultyLabel()}</b>`;
+  $('btnLevel').classList.toggle('hard', isHighDifficulty());
 }
-const levelLabel = () => RING_SIZES[settings.size].label;
+function setDifficulty(level) {
+  settings.difficulty = level;
+  saveSettings(); renderStats(); resetRound(); refreshDifficultyButton();
+}
 function setRingSize(size) {
   settings.size = size;
-  settings.hard = size === 'L';   // 大リング＝高難易度モード（向きランダム・揺れ最大・回転最大・赤い点なし）
   for (const r of document.querySelectorAll('input[name=size]')) r.checked = r.value === size;
   updateChainRange(); saveSettings(); renderStats(); resetRound();
-  $('btnLevel').innerHTML = `難易度<br><b>${levelLabel()}</b>`;
-  $('btnLevel').classList.toggle('hard', settings.hard);
 }
 $('btnLevel').addEventListener('click', e => {
   e.currentTarget.blur();
-  const cur = settings.size;
-  setLevel(LEVELS[(LEVELS.indexOf(cur) + 1) % LEVELS.length]);
+  const currentIndex = DIFFICULTIES.findIndex(level => level.value === settings.difficulty);
+  setDifficulty(DIFFICULTIES[(currentIndex + 1) % DIFFICULTIES.length].value);
 });
-$('btnLevel').innerHTML = `難易度<br><b>${levelLabel()}</b>`;
-$('btnLevel').classList.toggle('hard', settings.hard);
+refreshDifficultyButton();
 // 操作モード切替ボタン（左下）: 押すと固定ボタン ⇔ フリースティックを切り替えてリセット
 function setMode(m) {
   settings.mode = m; $('mode').value = m;
@@ -1121,7 +1012,10 @@ function setMode(m) {
 }
 $('btnMode').addEventListener('click', e => { e.currentTarget.blur(); setMode(settings.mode === 'fixed' ? 'free' : 'fixed'); });
 $('btnMode').innerHTML = settings.mode === 'fixed' ? 'ボタン<br>操作' : 'フリー<br>操作';
-$('btnReset').addEventListener('click', e => { e.currentTarget.blur(); resetRound(); });
+$('btnReset').addEventListener('click', e => {
+  e.currentTarget.blur();
+  resetRound({ keepLayout: game.state !== 'result' });
+});
 $('btnView').addEventListener('click', () => { viewIdx = (viewIdx + 1) % VIEWS.length; applyView(); renderStats(); });
 
 // バーチャルスティック
@@ -1152,7 +1046,7 @@ addEventListener('keydown', e => {
   if (e.key === ' ') { input.drop = true; e.preventDefault(); }
   if (e.key === 'Enter') input.start = true;
   if (e.key === 'v' || e.key === 'V') { viewIdx = (viewIdx + 1) % VIEWS.length; applyView(); renderStats(); }
-  if (e.key === 'r' || e.key === 'R') resetRound();
+  if (e.key === 'r' || e.key === 'R') resetRound({ keepLayout: true });
 });
 addEventListener('keyup', e => { const k = KEYMAP[e.key.toLowerCase()]; if (k) input.keys.delete(k); });
 addEventListener('blur', () => input.keys.clear());
@@ -1241,4 +1135,4 @@ renderStats();
 requestAnimationFrame(frame);
 
 // デバッグ用（ブラウザのコンソールから物理を早送りして検証できる）
-window.__ufo = { camMain, judgeCatch, input, setNoise: v => (NOISE = v), game, world, head, carriage, settings, resetRound, rackTilt, placeArm, stepSim, get round() { return round; }, get ring() { return ring; } };
+window.__ufo = { camMain, input, setNoise: v => (NOISE = v), game, world, head, carriage, settings, resetRound, rackTilt, placeArm, stepSim, get round() { return round; }, get ring() { return ring; } };

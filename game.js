@@ -882,6 +882,18 @@ function control(dt) {
   trackTouchdown();
   updateRack(dt);
   updateCatch(dt);
+  // フックの上に乗ったリングは丸いフック表面を滑り落ちる（物理エンジンの静止摩擦で止まりやすいので補う）
+  if (ring && round && !game.catch?.joint && ringLowest().p.y - SHELF.topY > HOOK.tipY + 0.1) {
+    const touching = world.contacts.some(c => (c.bi === ring && c.bj === round.hook) || (c.bj === ring && c.bi === round.hook));
+    if (touching) {
+      const apex = round.hook.pointToWorldFrame(V(0, HOOK.apexY, round.lay.dir * HOOK.apexZ));
+      let dx = ring.position.x - apex.x, dz = ring.position.z - apex.z;
+      const len = Math.hypot(dx, dz) || 1;
+      if (len < 0.02) { const a = Math.random() * Math.PI * 2; dx = Math.cos(a); dz = Math.sin(a); }
+      const f = ring.mass * G * 1.2;
+      ring.force.x += f * dx / len; ring.force.z += f * dz / len;
+    }
+  }
   // 下ろしてチェーンがたるんだら、リングの付け根はアームの真下（落ちた位置）に留まる
   if (['descend', 'bottom'].includes(game.state) && head.position.distanceTo(shackle.position) < rope.distance - 0.03) {
     shackle.position.x = head.position.x; shackle.position.z = head.position.z;
@@ -989,9 +1001,7 @@ function bindSettings() {
   for (const r of document.querySelectorAll('input[name=size]')) {
     r.checked = r.value === settings.size;
     r.onchange = () => {
-      settings.size = r.value;
-      updateChainRange();
-      saveSettings(); renderStats(); resetRound(); r.blur();
+      setRingSize(r.value); r.blur();
     };
   }
   const slider = (id, key, fmt) => {
@@ -1038,6 +1048,15 @@ holdButton(ui.btn2);
 ui.btnStart.addEventListener('pointerdown', e => { e.preventDefault(); input.start = true; });
 ui.btnDrop.addEventListener('pointerdown', e => { e.preventDefault(); input.drop = true; });
 // リセット：いつでも今のプレイを中断して次の配置へ（記録には数えない）
+// 難易度ボタン: リングの大きさ 大(やさしい) → 中 → 小(むずかしい) を切り替え
+function setRingSize(size) {
+  settings.size = size;
+  for (const r of document.querySelectorAll('input[name=size]')) r.checked = r.value === size;
+  updateChainRange(); saveSettings(); renderStats(); resetRound();
+  $('btnLevel').innerHTML = `難易度<br><b>${RING_SIZES[size].label}</b>`;
+}
+$('btnLevel').addEventListener('click', e => { e.currentTarget.blur(); setRingSize({ L: 'M', M: 'S', S: 'L' }[settings.size]); });
+$('btnLevel').innerHTML = `難易度<br><b>${RING_SIZES[settings.size].label}</b>`;
 $('btnReset').addEventListener('click', e => { e.currentTarget.blur(); resetRound(); });
 $('btnView').addEventListener('click', () => { viewIdx = (viewIdx + 1) % VIEWS.length; applyView(); renderStats(); });
 

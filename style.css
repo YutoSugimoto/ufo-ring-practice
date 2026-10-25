@@ -86,6 +86,8 @@ button.round.sub {
   width: 56px; height: 56px; border-radius: 50%; border: none; color: #fff;
   background: #b9b0c6; font-size: 13px; cursor: pointer;
 }
+button.round.sub.level { background: #7fc8ff; line-height: 1.15; }
+button.round.sub.level b { font-size: 15px; }
 button.round.sub.reset { background: #ff7eb6; font-size: 12px; }
 .hidden { display: none !important; }
 

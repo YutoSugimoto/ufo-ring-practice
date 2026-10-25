@@ -1,4 +1,4 @@
-// リング × フック設定 UFOキャッチャー練習
+// リング × フック設定 クレーンゲーム練習
 // アームからチェーンでリングがぶら下がっている。アクリル板の上に立つ固定フックの
 // 「開いている側」へリングを滑り込ませ、引き上げ時にフックへ掛かると、
 // フックとチェーンでつながった下の網台が吊り上がって傾き、景品が取り出し口へ落ちる。
@@ -12,11 +12,11 @@ import { Reflector } from 'three/addons/objects/Reflector.js';
 // ---------------------------------------------------------------- 定数
 const G = 98;
 const DT = 1 / 180;
-const CAB = { xMin: -4, xMax: 4, zMin: -3, zMax: 3, h: 12.2 };
+const CAB = { xMin: -4, xMax: 4, zMin: -3, zMax: 3, h: 13.4 };
 const CHUTE_X = -2.1;                 // x < CHUTE_X が取り出し口
 const HOME = { x: -3.0, z: 2.2 };     // アームの初期位置（左手前・取り出し口の上）
 const RANGE = { xMin: -3.2, xMax: 3.3, zMin: -2.5, zMax: 2.3 };
-const CARRIAGE_Y = 11.4;
+const CARRIAGE_Y = 12.6;
 const L_HOME = 0.7;
 const MOVE_SPEED = 1.6;               // 16cm/s
 const ACCEL = 30;                     // 実機のガントリーはほぼ急発進・急停止（アーム本体は揺れず、リングだけが振れる）
@@ -39,8 +39,15 @@ const HOOK = { stemTop: 0.62, apexY: 0.82, apexZ: 0.26, endY: 0.7, endZ: 0.46, t
 const GR = { STATIC: 1, RACK: 2, PRIZE: 4, HEAD: 8, RING: 16, HOOK: 32, SHELF: 64 };
 
 // ---------------------------------------------------------------- 設定・記録
-const DEFAULTS = { chain: 1.7, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 0, ringYaw: 0, twist: 0, swing: 0.5, weight: 3.0, random: true, pip: true };
+const DEFAULTS = { chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0, swing: 0.65, weight: 3.0, random: true, pip: true };
 const settings = Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem('ufo-hook-settings') || '{}'));
+// 保存済み設定の移行（v2: 既定のリング・フックを 90°、揺れやすさを少し上げた / v3: チェーンを長く）
+if ((settings.v ?? 1) < 3) {
+  // v3: チェーンを長く（リングが板に着いてからの滑り込み・傾きが大事なので）
+  Object.assign(settings, (settings.v ?? 1) < 2 ? { hookYaw: DEFAULTS.hookYaw, ringYaw: DEFAULTS.ringYaw, swing: Math.max(settings.swing, DEFAULTS.swing) } : {});
+  Object.assign(settings, { chain: Math.max(settings.chain, DEFAULTS.chain), v: 3 });
+  localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
+}
 // スマホの初回は重い映り込みをオフにしておく
 if (!localStorage.getItem('ufo-hook-settings') && matchMedia('(pointer: coarse)').matches) settings.reflect = false;
 const saveSettings = () => localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
@@ -101,10 +108,10 @@ scene.fog = new THREE.Fog(0xf3f1f6, 30, 55);
 const camMain = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
 const camPip = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
 const VIEWS = [
-  { name: '正面', pos: [0, 12.4, 21], look: [0, 5.6, 0] },   // 立った目線でやや上から
-  { name: '右横', pos: [19, 7.6, 0.3], look: [0, 5.2, 0] },
-  { name: '斜め', pos: [12, 12, 13], look: [0, 4.8, 0] },
-  { name: '真上', pos: [0, 21, 0.01], look: [0, 0, 0], noRoof: true },
+  { name: '正面', pos: [0, 13.2, 22], look: [0, 6.0, 0] },   // 立った目線でやや上から
+  { name: '右横', pos: [20, 8.2, 0.3], look: [0, 5.6, 0] },
+  { name: '斜め', pos: [12.5, 12.8, 13.5], look: [0, 5.2, 0] },
+  { name: '真上', pos: [0, 22, 0.01], look: [0, 0, 0], noRoof: true },
 ];
 let viewIdx = 0;
 const ROOF_LAYER = 1;
@@ -432,6 +439,79 @@ function updateRack(dt) {
   }
 }
 
+// 景品: ころんとしたぬいぐるみマスコット（ねこ・くま・うさぎ・ひよこ）
+const PLUSH_TYPES = [
+  { kind: 'cat', body: 0xfff4ea, accent: 0xffc7a1, ribbon: 0xff7eb6 },
+  { kind: 'bear', body: 0xe8c39e, accent: 0xfff0dc, ribbon: 0x7fc8ff },
+  { kind: 'rabbit', body: 0xffffff, accent: 0xffd0e0, ribbon: 0xa98bff },
+  { kind: 'chick', body: 0xffe27a, accent: 0xfff6c8, ribbon: 0xff8fa3 },
+];
+function buildPlush(t) {
+  const g = new THREE.Group();
+  const soft = c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.95 });
+  const mBody = soft(t.body), mAccent = soft(t.accent), mRibbon = new THREE.MeshStandardMaterial({ color: t.ribbon, roughness: 0.5 });
+  const mEye = new THREE.MeshStandardMaterial({ color: 0x2b2230, roughness: 0.3 });
+  const mShine = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const mCheek = new THREE.MeshStandardMaterial({ color: 0xff9db8, roughness: 0.9, transparent: true, opacity: 0.85 });
+  const ball = (r, m, x, y, z, sx = 1, sy = 1, sz = 1) => {
+    const b = shadowy(new THREE.Mesh(new THREE.SphereGeometry(r, 24, 18), m));
+    b.position.set(x, y, z); b.scale.set(sx, sy, sz); g.add(b); return b;
+  };
+  // 胴体・おなか・手足・しっぽ
+  ball(0.34, mBody, 0, -0.3, 0, 1.05, 0.92, 0.9);
+  ball(0.22, mAccent, 0, -0.32, 0.16, 1, 1, 0.6);
+  for (const sx of [-1, 1]) {
+    ball(0.1, mBody, sx * 0.3, -0.2, 0.12, 1, 1.2, 1);              // 手
+    ball(0.11, mBody, sx * 0.16, -0.56, 0.22, 1.1, 0.7, 1.3);        // 足
+    ball(0.055, mAccent, sx * 0.16, -0.55, 0.34, 1, 1, 0.5);         // 肉球
+  }
+  ball(t.kind === 'rabbit' ? 0.11 : 0.08, t.kind === 'rabbit' ? mAccent : mBody, 0, -0.42, -0.3);   // しっぽ
+  // 大きな頭
+  const hy = 0.36, hr = 0.4;
+  ball(hr, mBody, 0, hy, 0, 1.12, 0.95, 1);
+  // 耳
+  if (t.kind === 'cat') {
+    for (const sx of [-1, 1]) {
+      const e = shadowy(new THREE.Mesh(new THREE.ConeGeometry(0.13, 0.22, 16), mBody));
+      e.position.set(sx * 0.26, hy + 0.36, 0); e.rotation.z = -sx * 0.35; g.add(e);
+      const ei = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.13, 12), mAccent);
+      ei.position.set(sx * 0.255, hy + 0.34, 0.06); ei.rotation.z = -sx * 0.35; g.add(ei);
+    }
+  } else if (t.kind === 'bear') {
+    for (const sx of [-1, 1]) { ball(0.12, mBody, sx * 0.3, hy + 0.3, 0); ball(0.07, mAccent, sx * 0.3, hy + 0.3, 0.07, 1, 1, 0.5); }
+    ball(0.13, mAccent, 0, hy - 0.1, hr * 0.85, 1.2, 0.85, 0.6);     // マズル
+  } else if (t.kind === 'rabbit') {
+    for (const sx of [-1, 1]) {
+      const e = shadowy(new THREE.Mesh(new THREE.CapsuleGeometry(0.08, 0.36, 6, 14), mBody));
+      e.position.set(sx * 0.15, hy + 0.5, -0.02); e.rotation.z = -sx * 0.18; g.add(e);
+      const ei = new THREE.Mesh(new THREE.CapsuleGeometry(0.04, 0.28, 4, 10), mAccent);
+      ei.position.set(sx * 0.15, hy + 0.5, 0.05); ei.rotation.z = -sx * 0.18; g.add(ei);
+    }
+  } else {   // ひよこ: 頭のぴょこ毛とくちばし
+    for (const a of [-0.4, 0, 0.4]) {
+      const f = new THREE.Mesh(new THREE.ConeGeometry(0.03, 0.14, 8), mBody);
+      f.position.set(Math.sin(a) * 0.06, hy + 0.42, 0); f.rotation.z = a; g.add(f);
+    }
+    const beak = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.12, 12), new THREE.MeshStandardMaterial({ color: 0xffa040, roughness: 0.6 }));
+    beak.rotation.x = Math.PI / 2; beak.position.set(0, hy - 0.08, hr * 0.98); g.add(beak);
+  }
+  // 顔: キラキラの目・ほっぺ・鼻
+  for (const sx of [-1, 1]) {
+    ball(0.062, mEye, sx * 0.15, hy + 0.02, hr * 0.9, 0.9, 1.15, 0.6);
+    const shine = new THREE.Mesh(new THREE.SphereGeometry(0.022, 10, 8), mShine);
+    shine.position.set(sx * 0.15 + 0.02, hy + 0.06, hr * 0.94); g.add(shine);
+    ball(0.06, mCheek, sx * 0.27, hy - 0.1, hr * 0.78, 1.2, 0.7, 0.4);
+  }
+  if (t.kind !== 'chick') ball(0.03, new THREE.MeshStandardMaterial({ color: 0xff7f9e }), 0, hy - 0.07, hr * (t.kind === 'bear' ? 1.04 : 0.96));
+  // 首のリボン
+  for (const sx of [-1, 1]) {
+    const r = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.16, 12), mRibbon);
+    r.rotation.z = sx * Math.PI / 2; r.position.set(sx * 0.08, hy - 0.36, 0.26); g.add(r);
+  }
+  ball(0.045, mRibbon, 0, hy - 0.36, 0.28);
+  return g;
+}
+
 // 景品「おすがた」フィギュア
 function buildPrize() {
   const body = new CANNON.Body({
@@ -443,25 +523,7 @@ function buildPrize() {
   body.addShape(new CANNON.Box(V(0.4, 0.06, 0.4)), V(0, -0.56, 0));
   body.addShape(new CANNON.Box(V(0.28, 0.42, 0.24)), V(0, -0.08, 0));
   body.addShape(new CANNON.Sphere(0.34), V(0, 0.62, 0));
-  const obj = new THREE.Group();
-  const hue = Math.random();
-  const mBody = new THREE.MeshStandardMaterial({ color: new THREE.Color().setHSL(hue, 0.6, 0.62), roughness: 0.6 });
-  const mSkin = new THREE.MeshStandardMaterial({ color: 0xffe3d2, roughness: 0.7 });
-  const mHair = new THREE.MeshStandardMaterial({ color: new THREE.Color().setHSL((hue + 0.5) % 1, 0.45, 0.4), roughness: 0.6 });
-  const mDark = new THREE.MeshStandardMaterial({ color: 0x222222 });
-  const mCheek = new THREE.MeshStandardMaterial({ color: 0xff9fb8 });
-  const base = shadowy(new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.44, 0.12, 28), new THREE.MeshPhysicalMaterial({ color: 0xffffff, transparent: true, opacity: 0.6, roughness: 0.1 })));
-  base.position.y = -0.56; obj.add(base);
-  const torso = shadowy(new THREE.Mesh(new THREE.CapsuleGeometry(0.24, 0.42, 6, 16), mBody)); torso.position.y = -0.1; obj.add(torso);
-  const head = shadowy(new THREE.Mesh(new THREE.SphereGeometry(0.34, 24, 16), mSkin)); head.position.y = 0.62; obj.add(head);
-  const hair = shadowy(new THREE.Mesh(new THREE.SphereGeometry(0.36, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.55), mHair));
-  hair.position.y = 0.66; obj.add(hair);
-  for (const s of [-1, 1]) {
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.045, 10, 8), mDark); eye.position.set(s * 0.12, 0.6, 0.31); obj.add(eye);
-    const cheek = new THREE.Mesh(new THREE.SphereGeometry(0.04, 10, 8), mCheek); cheek.position.set(s * 0.2, 0.52, 0.27); obj.add(cheek);
-    const ear = shadowy(new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.22, 12), mHair)); ear.position.set(s * 0.22, 0.98, 0); ear.rotation.z = -s * 0.4; obj.add(ear);
-    const arm = shadowy(new THREE.Mesh(new THREE.CapsuleGeometry(0.07, 0.28, 4, 8), mBody)); arm.position.set(s * 0.32, -0.05, 0.05); arm.rotation.z = s * 0.3; obj.add(arm);
-  }
+  const obj = buildPlush(PLUSH_TYPES[Math.floor(Math.random() * PLUSH_TYPES.length)]);
   world.addBody(body);
   link(body, obj);
   return body;

@@ -83,7 +83,8 @@ delete settings.weight;
 delete settings.hard;
 if ((storedSettings.v ?? 1) < 18) { settings.hookDir = 'front'; settings.hookYaw = 90; settings.ringYaw = 90; }   // v18: フック真ん中固定・右開き 90°
 if ((storedSettings.v ?? 1) < 19) { settings.reflect = true; if (!(settings.twist > 0)) settings.twist = 0.5; }   // v19: 映り込みオン・揺れでリングが回るを中で既定オン
-settings.v = 19;
+if ((storedSettings.v ?? 1) < 20) settings.hint = false;   // v20: ヒントは既定オフ（ヒートマップ版）
+settings.v = 20;
 localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const saveSettings = () => localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const statKey = () => {
@@ -1049,7 +1050,7 @@ function bindSettings() {
   const pip = $('pip'); pip.checked = settings.pip; document.body.classList.toggle('pip', settings.pip);
   pip.onchange = () => { settings.pip = pip.checked; saveSettings(); document.body.classList.toggle('pip', settings.pip); resize(); pip.blur(); };
   const hintEl = $('hint'); hintEl.checked = settings.hint;
-  hintEl.onchange = () => { settings.hint = hintEl.checked; saveSettings(); hintEl.blur(); if (game.state === 'idle') startHint('x'); else clearHint(); };
+  hintEl.onchange = () => { settings.hint = hintEl.checked; saveSettings(); hintEl.blur(); heat.t = 0; };
   for (const key of ['reflect', 'grid', 'marker']) {
     const el = $(key); el.checked = settings[key];
     el.onchange = () => { settings[key] = el.checked; saveSettings(); applyShelfOptions(); el.blur(); };
@@ -1186,113 +1187,93 @@ function resize() {
 }
 addEventListener('resize', resize);
 
-// ---------------------------------------------------------------- ヒントモード
-// 物理の状態をまるごと保存し、裏で「ここで①（②）を離したら」を何通りも試して、取れる停止位置を板の上に表示する。
-//  ①のヒント: 待機中の状態から、①を各位置で離し、②はフックの奥行きぴったりで止めた場合
-//  ②のヒント: 実際に①を離した瞬間の状態（リングの揺れを含む）から、②を各位置で離した場合
-// 微振動などの乱数があるので目安。1 フレームあたり数 ms だけ計算して少しずつ埋めていく
-function snapshotWorld() {
-  return {
-    bodies: world.bodies.map(b => [b, b.position.clone(), b.quaternion.clone(), b.velocity.clone(), b.angularVelocity.clone()]),
-    game: Object.assign({}, game, { vel: { ...game.vel } }),
-    theta: round.theta,
-    input: { b1: input.b1, b2: input.b2, drop: input.drop, start: input.start, stick: { ...input.stick } },
-    rope: rope.distance, shMask: shackle.collisionFilterMask, ringMask: ring.collisionFilterMask, acc, rng: physRng.s,
-    floor: restoredFloorContacts ?? ringFloorContactsPeek(),
-  };
+// ---------------------------------------------------------------- ヒントモード（ヒートマップ）
+// アームを止める位置ごとに「取れる確率」をタイルで表示する。物理演算はせず、今のリングの揺れから簡単に計算する:
+//  ・リングの揺れ = 付け根まわりの振り子（2 次元の単振動）。今のずれ d と速度 v から、着地時の位相は分からないので
+//    位相を一様にばらした時の着地位置の分布を考える（左に振れている時に押すか右の時かで変わる分を % で表す）
+//  ・止めた時の急停止で、移動方向に「速さ/ω」の揺れが加わる（位相はやはり不明としてばらす）
+//  ・着地までの時間（停止→下降）で減衰させる
+//  ・着地点（＝止めた位置＋揺れのずれ）がフックの「開いている側の手前」の帯に入れば取れる、とする
+// 帯の大きさは物理シミュレーションで確かめた範囲（中リング: 先端から 1〜4cm 手前、左右 ±2.5cm）を目安に、リングの大きさで伸縮
+const HEAT = { half: 1.1, cell: 0.1, every: 0.12 };
+const heat = { t: 0, mesh: null, canvas: null, ctx: null, tex: null, n: 0 };
+{
+  heat.n = Math.round(HEAT.half * 2 / HEAT.cell);
+  heat.canvas = document.createElement('canvas');
+  heat.canvas.width = heat.canvas.height = heat.n * 40;
+  heat.ctx = heat.canvas.getContext('2d');
+  heat.tex = new THREE.CanvasTexture(heat.canvas); heat.tex.colorSpace = THREE.SRGBColorSpace;
+  heat.mesh = new THREE.Mesh(new THREE.PlaneGeometry(HEAT.half * 2, HEAT.half * 2),
+    new THREE.MeshBasicMaterial({ map: heat.tex, transparent: true, depthWrite: false }));
+  heat.mesh.rotation.x = -Math.PI / 2; heat.mesh.renderOrder = 6; heat.mesh.visible = false;
+  scene.add(heat.mesh);
 }
-function restoreWorld(sn) {
-  for (const [b, p, q, v, w] of sn.bodies) {
-    b.position.copy(p); b.quaternion.copy(q); b.velocity.copy(v); b.angularVelocity.copy(w);
-    b.previousPosition.copy(p); b.interpolatedPosition.copy(p);
-    b.force.setZero(); b.torque.setZero();
-    b.aabbNeedsUpdate = true;
-    b.updateInertiaWorld(true);   // 回転から計算される慣性テンソルも戻す（古い値のままだと結果がずれる）
-  }
-  Object.assign(game, sn.game, { vel: { ...sn.game.vel } });
-  round.theta = sn.theta;
-  Object.assign(input, sn.input, { stick: { ...sn.input.stick } });
-  rope.distance = sn.rope; shackle.collisionFilterMask = sn.shMask; ring.collisionFilterMask = sn.ringMask;
-  acc = sn.acc; physRng.s = sn.rng;
-  world.contacts.length = 0;
-  restoredFloorContacts = sn.floor.map(c => ({ r: c.r.clone(), f: c.f }));
-}
-
-const hint = { job: null, group: new THREE.Group() };
-scene.add(hint.group);
-const hintMat = {
-  ok: new THREE.MeshBasicMaterial({ color: 0x18c964, transparent: true, opacity: 0.95, depthWrite: false }),
-};
-const hintDotGeo = new THREE.CircleGeometry(0.07, 24);   // 取れる停止位置の緑の丸
-function clearHint() { hint.job = null; hint.group.clear(); }
-// 候補は「粗く（2cm刻み）→ 間を埋める（1cm）」の 2 段階。取れる位置にだけ緑の丸を置く
-function startHint(kind) {
-  clearHint();
-  if (!settings.hint || settings.mode !== 'fixed' || !round) return;
-  const { lay } = round;
-  const all = [];
-  if (kind === 'x') {
-    for (let x = Math.max(RANGE.xMin + 0.1, lay.x - 0.8); x <= Math.min(RANGE.xMax, lay.x + 0.8) + 1e-6; x += 0.1) all.push(+x.toFixed(3));
-  } else {
-    const z0 = carriage.position.z;
-    for (let z = Math.min(z0 - 0.1, lay.z + 0.8); z >= Math.max(RANGE.zMin, lay.z - 0.8) - 1e-6; z -= 0.1) all.push(+z.toFixed(3));
-  }
-  const coarse = all.filter((_, i) => i % 2 === 0), fine = all.filter((_, i) => i % 2 === 1);
-  hint.job = { kind, passes: [coarse, fine], pass: 0, cands: coarse, idx: 0, done: 0, total: all.length,
-    base: snapshotWorld(), trial: null, prefix: null, ok: [], hookZ: lay.z, carX: carriage.position.x };
-}
-function addHintDot(job, c) {
-  const m = new THREE.Mesh(hintDotGeo, hintMat.ok);
-  m.rotation.x = -Math.PI / 2; m.renderOrder = 6;
-  if (job.kind === 'x') m.position.set(c, SHELF.topY + 0.015, job.hookZ); else m.position.set(job.carX, SHELF.topY + 0.015, c);
-  hint.group.add(m);
-}
-// 1 試行を少しずつ進める。終わったら true/false を返す（途中なら undefined）
-// 候補は移動方向の順に並んでいるので、「ボタンを押し続けて次の候補位置に着いた瞬間」の状態を job.prefix に
-// 残し、次の候補はそこから始める（移動部分を毎回計算し直さない）
-function stepHintTrial(tr, maxSteps) {
-  const job = hint.job, kind = job.kind, hookZ = round.lay.z;
-  for (let i = 0; i < maxSteps; i++) {
-    if (kind === 'x') {
-      if (tr.phase === 0) {
-        input.b1 = true;
-        if (carriage.position.x >= tr.target) { job.prefix = { snap: snapshotWorld(), phase: 0 }; input.b1 = false; tr.phase = 1; }
-      } else if (tr.phase === 1 && game.state === 'fixed2' && game.t > 0.25) { input.b2 = true; tr.phase = 2; }
-      if (tr.phase === 2 && carriage.position.z <= hookZ) { input.b2 = false; tr.phase = 3; }
-    } else {
-      if (tr.phase === 0 && game.t > 0.25) { input.b2 = true; tr.phase = 1; }
-      if (tr.phase === 1 && carriage.position.z <= tr.target) { job.prefix = { snap: snapshotWorld(), phase: 1 }; input.b2 = false; tr.phase = 2; }
+// 止める位置 (sx, sz) に対する取れる確率
+function heatProbabilities(movingAxis) {
+  const { lay } = round, R = ringR;
+  const od = round.hook.quaternion.vmult(V(0, 0, lay.dir));                 // 開いている向き
+  const perp = V(od.z, 0, -od.x);
+  const n = ring.quaternion.vmult(V(0, 0, 1));
+  const align = Math.min(1, Math.abs(od.x * n.x + od.z * n.z) / 0.7);       // リング面がフックの向きに合っているほど 1
+  const sMin = HOOK.endZ - 0.36 + 0.1 * (R - 0.6), sMax = HOOK.endZ - 0.06 + 0.5 * (R - 0.6);   // 着地点の帯（開いている向きの距離）
+  const latMax = 0.25 * R / 0.6;
+  // 今の揺れ（付け根まわりの振り子）
+  const Leff = rope.distance + R;
+  const w = Math.sqrt(G / Leff);
+  const dx = ring.position.x - head.position.x, dz = ring.position.z - head.position.z;
+  const vx = (ring.velocity.x - head.velocity.x) / w, vz = (ring.velocity.z - head.velocity.z) / w;
+  // 着地までの時間と減衰
+  const descT = 0.5 + Math.max(0, game.Ltarget - game.L) / DESCEND_SPEED;
+  const decay = Math.pow(1 - ring.linearDamping, descT / 2);
+  const speed = SPEEDS[isHighDifficulty() ? 1 : isEasyDifficulty() ? 0 : settings.speed];
+  const kick = speed / w * 0.6;                                              // 急停止で加わる揺れ
+  const P = 16, Q = 6;
+  const out = new Float32Array(heat.n * heat.n);
+  const cx0 = lay.x - HEAT.half + HEAT.cell / 2, cz0 = lay.z - HEAT.half + HEAT.cell / 2;
+  for (let iz = 0; iz < heat.n; iz++) for (let ix = 0; ix < heat.n; ix++) {
+    const sx = cx0 + ix * HEAT.cell, sz = cz0 + iz * HEAT.cell;
+    // 移動中の軸の方向（①なら +x、②なら -z、待機中は両方）に止めた時の揺れ
+    let hit = 0;
+    for (let i = 0; i < P; i++) {
+      const a = (i + 0.5) / P * Math.PI * 2;
+      const ox = (dx * Math.cos(a) + vx * Math.sin(a)) * decay, oz = (dz * Math.cos(a) + vz * Math.sin(a)) * decay;
+      for (let j = 0; j < Q; j++) {
+        const b = (j + 0.5) / Q * Math.PI * 2, k = Math.cos(b) * kick * decay;
+        const kx = movingAxis !== 'z' ? k : 0, kz = movingAxis !== 'x' ? -k : 0;
+        const px = sx + ox + kx - lay.x, pz = sz + oz + kz - lay.z;
+        const s = px * od.x + pz * od.z, lat = px * perp.x + pz * perp.z;
+        if (s > sMin && s < sMax && Math.abs(lat) < latMax) hit++;
+      }
     }
-    control(DT); world.step(DT); tr.steps++;
-    if (tr.steps > 90 && game.state === 'idle') return false;   // 動き出せない（既に通り過ぎた位置など）
-    if (round.theta > 2.5 * DEG) return true;                                         // 網台が持ち上がり始めた＝取れる
-    // リングがフックより十分上まで上がってもフックが動かなければ外れ
-    if (game.state === 'lift' && (game.t > 3.0 || ringLowest().p.y - SHELF.topY > HOOK.apexY + 0.25)) return false;
-    if (['hold', 'return', 'result'].includes(game.state) || tr.steps > 120 * 14) return false;
+    out[iz * heat.n + ix] = hit / (P * Q) * align;
   }
-  return undefined;
+  return out;
 }
-function runHint(budgetMs) {
-  const job = hint.job;
-  if (!job || job.idx >= job.cands.length) return;   // 全段階終了
-  const t0 = performance.now();
-  const real = snapshotWorld();
-  while (performance.now() - t0 < budgetMs && job.idx < job.cands.length) {
-    if (!job.trial) {
-      job.trial = { target: job.cands[job.idx], phase: 0, steps: 0, snap: null };
-      if (job.prefix) { restoreWorld(job.prefix.snap); job.trial.phase = job.prefix.phase; } else restoreWorld(job.base);
-    } else restoreWorld(job.trial.snap);
-    game.sim = true;
-    const r = stepHintTrial(job.trial, 15);   // 細かく区切って 1 フレームの計算時間を守る
-    if (r === undefined) { job.trial.snap = snapshotWorld(); continue; }
-    if (r) addHintDot(job, job.cands[job.idx]);
-    job.idx++; job.done++; job.trial = null;
-    if (job.idx >= job.cands.length && job.pass < job.passes.length - 1) {   // 次の段階（間を埋める）へ
-      job.pass++; job.cands = job.passes[job.pass]; job.idx = 0; job.prefix = null;
-    }
+function drawHeat(prob) {
+  const g = heat.ctx, n = heat.n, c = heat.canvas.width / n;
+  g.clearRect(0, 0, heat.canvas.width, heat.canvas.height);
+  g.font = `bold ${Math.round(c * 0.42)}px sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
+  for (let iz = 0; iz < n; iz++) for (let ix = 0; ix < n; ix++) {
+    const p = prob[iz * n + ix];
+    if (p < 0.05) continue;
+    // 低い→黄、高い→緑（キャンバスの y はワールドの z と同じ向き）
+    const hue = 50 + 80 * p;
+    g.fillStyle = `hsla(${hue}, 85%, 45%, ${0.25 + 0.5 * p})`;
+    g.fillRect(ix * c + 1, iz * c + 1, c - 2, c - 2);
+    if (p >= 0.1) { g.fillStyle = 'rgba(255,255,255,0.95)'; g.fillText(`${Math.round(p * 100)}`, ix * c + c / 2, iz * c + c / 2); }
   }
-  restoreWorld(real);
-  game.sim = false;
+  heat.tex.needsUpdate = true;
+}
+function updateHeat(dt) {
+  const show = settings.hint && round && ring && ['idle', 'fixed1', 'fixed2', 'free'].includes(game.state);
+  heat.mesh.visible = !!show;
+  if (!show) return;
+  heat.mesh.position.set(round.lay.x, SHELF.topY + 0.02, round.lay.z);
+  heat.t -= dt;
+  if (heat.t > 0) return;
+  heat.t = HEAT.every;
+  const axis = game.state === 'fixed2' ? 'z' : game.state === 'fixed1' ? 'x' : 'both';
+  drawHeat(heatProbabilities(axis));
 }
 
 let last = performance.now(), acc = 0, lastState = null;
@@ -1304,23 +1285,11 @@ function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
   pollInput();
   if (!game.paused) stepSim(dt);
-  if (game.state !== lastState) {
-    // ヒント: 待機に戻ったら①のヒント、①を離した瞬間に②のヒントを計算し直す。下降が始まったら消す
-    if (game.state === 'idle') startHint('x');
-    else if (game.state === 'fixed2') startHint('z');
-    else if (['wait', 'descend', 'bottom'].includes(game.state)) hint.job = null;   // 表示は残して計算だけ止める
-    else if (game.state !== 'fixed1') clearHint();
-    lastState = game.state; updateUI();
-  }
-  if (!game.paused && hint.job) runHint(['idle', 'fixed2'].includes(game.state) ? 22 : 6);
-  // ヒントの進み具合と見方を状態表示に添える
-  if (settings.hint && settings.mode === 'fixed' && (hint.job || hint.group.children.length)) {
-    const job = hint.job, base = STATUS[game.state]?.() ?? '';
-    const which = game.state === 'fixed2' || (job?.kind === 'z') ? '②' : '①';
-    const running = job && job.idx < job.cands.length;
-    ui.status.textContent = running
-      ? `${base}（ヒント計算中 ${Math.round(job.done / job.total * 100)}%）`
-      : hint.group.children.length ? `${base}（緑の丸＝ここで${which}を離すと取れる）` : `${base}（ヒント: 取れる位置なし）`;
+  if (game.state !== lastState) { lastState = game.state; updateUI(); }
+  updateHeat(dt);
+  if (settings.hint && heat.mesh.visible) {
+    const base = STATUS[game.state]?.() ?? '';
+    ui.status.textContent = `${base}（ヒント: 数字＝そこで止めた時に取れる確率%）`;
   }
 
   for (const { body, obj } of synced) { obj.position.copy(body.position); obj.quaternion.copy(body.quaternion); }
@@ -1357,4 +1326,4 @@ renderStats();
 requestAnimationFrame(frame);
 
 // デバッグ用（ブラウザのコンソールから物理を早送りして検証できる）
-window.__ufo = { hint, runHint, startHint, restoreWorld, snapshotWorld, camMain, input, setNoise: v => (NOISE = v), game, world, head, carriage, settings, resetRound, rackTilt, placeArm, stepSim, get round() { return round; }, get ring() { return ring; } };
+window.__ufo = { heat, heatProbabilities, camMain, input, setNoise: v => (NOISE = v), game, world, head, carriage, settings, resetRound, rackTilt, placeArm, stepSim, get round() { return round; }, get ring() { return ring; } };

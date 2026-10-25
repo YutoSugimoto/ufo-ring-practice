@@ -62,7 +62,7 @@ if (!['high', 'normal', 'easy'].includes(storedSettings.difficulty)) {
 }
 delete settings.captureModel;
 // スマホの初回は重い映り込みをオフにしておく
-if (!savedSettings && matchMedia('(pointer: coarse)').matches) settings.reflect = false;
+
 // 保存済み設定の移行
 //  v2: 既定のリング・フックを 90°、揺れやすさを少し上げた
 //  v4: チェーン既定 30cm（下ろしたときにリングが板の上を滑って傾く動きが大事）
@@ -82,7 +82,8 @@ delete settings.floorMu;
 delete settings.weight;
 delete settings.hard;
 if ((storedSettings.v ?? 1) < 18) { settings.hookDir = 'front'; settings.hookYaw = 90; settings.ringYaw = 90; }   // v18: フック真ん中固定・右開き 90°
-settings.v = 18;
+if ((storedSettings.v ?? 1) < 19) { settings.reflect = true; if (!(settings.twist > 0)) settings.twist = 0.5; }   // v19: 映り込みオン・揺れでリングが回るを中で既定オン
+settings.v = 19;
 localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const saveSettings = () => localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const statKey = () => {
@@ -296,10 +297,10 @@ function buildShelfSurface(cx, cz, w, d) {
   const y = SHELF.topY;
   // 映り込み。Reflector は不透明なので、シェーダーの α を下げて半透明にする
   shelfReflector = new Reflector(new THREE.PlaneGeometry(w, d), {
-    textureWidth: 1024, textureHeight: 1024, color: 0xffffff, clipBias: 0.003,
+    textureWidth: 1024, textureHeight: 1024, color: 0x808080, clipBias: 0.003,   // 灰色(0.5)なら overlay 合成で映り込みがそのまま出る（白だと真っ白に飛ぶ）
   });
   shelfReflector.material.fragmentShader = shelfReflector.material.fragmentShader
-    .replace('vec4( blendOverlay( base.rgb, color ), 1.0 )', 'vec4( blendOverlay( base.rgb, color ), 0.2 )');
+    .replace('vec4( blendOverlay( base.rgb, color ), 1.0 )', 'vec4( blendOverlay( base.rgb, color ), 0.35 )');
   shelfReflector.material.transparent = true;
   shelfReflector.material.depthWrite = false;
   shelfReflector.rotation.x = -Math.PI / 2;
@@ -1221,10 +1222,10 @@ const hint = { job: null, group: new THREE.Group() };
 scene.add(hint.group);
 const hintMat = {
   ok: new THREE.MeshBasicMaterial({ color: 0x18c964, transparent: true, opacity: 0.9, depthWrite: false }),
-  ng: new THREE.MeshBasicMaterial({ color: 0x9aa0aa, transparent: true, opacity: 0.35, depthWrite: false }),
-  wait: new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25, depthWrite: false }),
+  ng: new THREE.MeshBasicMaterial({ color: 0x7a808c, transparent: true, opacity: 0.55, depthWrite: false }),
+  wait: new THREE.MeshBasicMaterial({ color: 0x6fb7ff, transparent: true, opacity: 0.45, depthWrite: false }),
 };
-const hintGeo = new THREE.PlaneGeometry(0.085, 0.085);
+const hintGeo = new THREE.PlaneGeometry(0.09, 0.22);   // 移動方向に細長いマス（並ぶと線に見える）
 function clearHint() { hint.job = null; hint.group.clear(); }
 function startHint(kind) {
   clearHint();
@@ -1240,6 +1241,7 @@ function startHint(kind) {
   const markers = cands.map(c => {
     const m = new THREE.Mesh(hintGeo, hintMat.wait);
     m.rotation.x = -Math.PI / 2; m.renderOrder = 6;
+    if (kind === 'x') m.rotation.z = 0; else m.rotation.z = Math.PI / 2;
     if (kind === 'x') m.position.set(c, SHELF.topY + 0.015, lay.z); else m.position.set(carriage.position.x, SHELF.topY + 0.015, c);
     hint.group.add(m);
     return m;
@@ -1263,6 +1265,7 @@ function stepHintTrial(tr, maxSteps) {
       if (tr.phase === 1 && carriage.position.z <= tr.target) { job.prefix = { snap: snapshotWorld(), phase: 1 }; input.b2 = false; tr.phase = 2; }
     }
     control(DT); world.step(DT); tr.steps++;
+    if (tr.steps > 90 && game.state === 'idle') return false;   // 動き出せない（既に通り過ぎた位置など）
     if (round.theta > 4 * DEG) return true;                                           // 網台が持ち上がった＝取れる
     // リングがフックより十分上まで上がってもフックが動かなければ外れ
     if (game.state === 'lift' && (game.t > 3.5 || ringLowest().p.y - SHELF.topY > HOOK.apexY + 0.5)) return false;
@@ -1281,7 +1284,7 @@ function runHint(budgetMs) {
       if (job.prefix) { restoreWorld(job.prefix.snap); job.trial.phase = job.prefix.phase; } else restoreWorld(job.base);
     } else restoreWorld(job.trial.snap);
     game.sim = true;
-    const r = stepHintTrial(job.trial, 90);
+    const r = stepHintTrial(job.trial, 15);   // 細かく区切って 1 フレームの計算時間を守る
     if (r === undefined) { job.trial.snap = snapshotWorld(); continue; }
     job.markers[job.idx].material = r ? hintMat.ok : hintMat.ng;
     job.idx++; job.trial = null;
@@ -1307,7 +1310,7 @@ function frame(now) {
     else if (game.state !== 'fixed1') clearHint();
     lastState = game.state; updateUI();
   }
-  if (!game.paused && hint.job) runHint(['idle', 'fixed2'].includes(game.state) ? 12 : 5);
+  if (!game.paused && hint.job) runHint(['idle', 'fixed2'].includes(game.state) ? 14 : 5);
   // ヒントの進み具合と見方を状態表示に添える
   if (settings.hint && settings.mode === 'fixed' && hint.group.children.length) {
     const job = hint.job, base = STATUS[game.state]?.() ?? '';

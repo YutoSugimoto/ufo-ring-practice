@@ -65,10 +65,11 @@ delete settings.armStop;
 if ((settings.v ?? 1) < 7) settings.chain = DEFAULT_CHAIN;
 if ((settings.v ?? 1) < 8 && !settings.twist) settings.twist = DEFAULTS.twist;   // v8: 揺れでリングが回るを既定でオン   // v7: チェーン既定 22cm・下降位置はリングが 2cm 浮く高さ
 delete settings.weight;
+settings.hard = settings.size === 'L';
 settings.v = 8;
 localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const saveSettings = () => localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
-const statKey = () => `ufo-hook-stats-${settings.mode}-${settings.hard ? 'H' : settings.size}`;
+const statKey = () => `ufo-hook-stats-${settings.mode}-${settings.size}`;
 const loadStats = () => Object.assign({ tries: 0, wins: 0, streak: 0, best: 0 }, JSON.parse(localStorage.getItem(statKey()) || '{}'));
 const saveStats = s => localStorage.setItem(statKey(), JSON.stringify(s));
 
@@ -1017,7 +1018,7 @@ function renderStats() {
   const s = loadStats();
   const rate = s.tries ? Math.round((s.wins / s.tries) * 100) : 0;
   ui.stats.innerHTML =
-    `<div>${settings.mode === 'fixed' ? '固定ボタン' : 'フリースティック'} / 難易度<b>${settings.hard ? '高' : RING_SIZES[settings.size].label}</b></div>` +
+    `<div>${settings.mode === 'fixed' ? '固定ボタン' : 'フリースティック'} / 難易度<b>${RING_SIZES[settings.size].label}</b></div>` +
     `<div>挑戦 <b>${s.tries}</b>　成功 <b>${s.wins}</b>　成功率 <b>${rate}%</b></div>` +
     `<div>連続 <b>${s.streak}</b>　最高連続 <b>${s.best}</b></div>` +
     `<div class="dim">視点: ${VIEWS[viewIdx].name}</div>`;
@@ -1040,7 +1041,7 @@ function bindSettings() {
   for (const r of document.querySelectorAll('input[name=size]')) {
     r.checked = r.value === settings.size;
     r.onchange = () => {
-      settings.hard = false; setRingSize(r.value); r.blur();
+      setRingSize(r.value); r.blur();
     };
   }
   const slider = (id, key, fmt) => {
@@ -1088,14 +1089,14 @@ ui.btnStart.addEventListener('pointerdown', e => { e.preventDefault(); input.sta
 ui.btnDrop.addEventListener('pointerdown', e => { e.preventDefault(); input.drop = true; });
 // リセット：いつでも今のプレイを中断して次の配置へ（記録には数えない）
 // 難易度ボタン: リングの大きさ 大(やさしい) → 中 → 小(むずかしい) を切り替え
-const LEVELS = ['L', 'M', 'S', 'H'];   // 大 → 中 → 小 → 高
+const LEVELS = ['L', 'M', 'S'];   // 大（＝高難易度モード）→ 中 → 小
 function setLevel(lv) {
-  settings.hard = lv === 'H';
-  setRingSize(lv === 'H' ? 'L' : lv);
+  setRingSize(lv);
 }
-const levelLabel = () => settings.hard ? '高' : RING_SIZES[settings.size].label;
+const levelLabel = () => RING_SIZES[settings.size].label;
 function setRingSize(size) {
   settings.size = size;
+  settings.hard = size === 'L';   // 大リング＝高難易度モード（向きランダム・揺れ最大・回転最大・赤い点なし）
   for (const r of document.querySelectorAll('input[name=size]')) r.checked = r.value === size;
   updateChainRange(); saveSettings(); renderStats(); resetRound();
   $('btnLevel').innerHTML = `難易度<br><b>${levelLabel()}</b>`;
@@ -1103,7 +1104,7 @@ function setRingSize(size) {
 }
 $('btnLevel').addEventListener('click', e => {
   e.currentTarget.blur();
-  const cur = settings.hard ? 'H' : settings.size;
+  const cur = settings.size;
   setLevel(LEVELS[(LEVELS.indexOf(cur) + 1) % LEVELS.length]);
 });
 $('btnLevel').innerHTML = `難易度<br><b>${levelLabel()}</b>`;

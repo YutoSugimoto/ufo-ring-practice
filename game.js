@@ -32,7 +32,9 @@ function homePos() {
 const CARRIAGE_Y = 14.4;
 const L_HOME = 0.7;
 const SPEEDS = { 0: 1.1, 0.5: 1.6, 1: 2.4 };   // クレーンの移動速度 小 11cm/s・中 16cm/s・大 24cm/s（速いほど止めた時によく揺れる）
-const ACCEL = 60;                     // 実機のガントリーはほぼ急発進・急停止（アーム本体は揺れず、リングだけが振れる）
+const ACCEL = 60; 
+const JOLT = 0.6;                      // 発進・停止の「ガクッ」でリングに加わる勢い（速度変化の割合）
+                    // 実機のガントリーはほぼ急発進・急停止（アーム本体は揺れず、リングだけが振れる）
 const DESCEND_SPEED = 1.4;
 const LIFT_SPEED = 1.0;
 const BOTTOM_HOLD = 1.2;             // 下降停止後、引き上げまでの待ち時間
@@ -42,7 +44,7 @@ const RING_SIZES = { L: { R: 0.8, label: '大' }, M: { R: 0.6, label: '中' }, S
 const TUBE = 0.055;
 
 const HEAD_HY = 0.26;
-const DEFAULT_CHAIN = 2.2;             // チェーンの既定 22cm
+const DEFAULT_CHAIN = 3.0;             // チェーンの既定 30cm（長いほどゆっくり大きく揺れる）
 // アームが下りる高さ（台の固定設定）: 既定のチェーンで、リングとチェーンをつなぐ金具（リングの付け根）が
 // 板から 2cm 浮く高さ。リング本体は板に着いて斜めに寝る。チェーンを伸ばすと付け根も板に着いてリングが平らに倒れる
 const armStop = () => HEAD_HY + DEFAULT_CHAIN + 0.2;
@@ -65,7 +67,7 @@ const FLOOR_MU = { defaultKinetic: 0.12, staticRatio: 1.35, staticExtra: 0.02, s
 const floorMuS = () => settings.floorMuK * FLOOR_MU.staticRatio + FLOOR_MU.staticExtra;
 
 // ---------------------------------------------------------------- 設定・記録
-const DEFAULTS = { speed: 0.5, difficulty: 'normal', marker: true, floorMuK: FLOOR_MU.defaultKinetic, chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'front', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.65, random: true, pip: true };
+const DEFAULTS = { speed: 0.5, difficulty: 'normal', marker: true, floorMuK: FLOOR_MU.defaultKinetic, chain: DEFAULT_CHAIN, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'front', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.9, random: true, pip: true };
 const savedSettings = localStorage.getItem('ufo-hook-settings');
 const storedSettings = JSON.parse(savedSettings || '{}') || {};
 const settings = Object.assign({}, DEFAULTS, storedSettings);
@@ -97,7 +99,8 @@ delete settings.hard;
 if ((storedSettings.v ?? 1) < 18) { settings.hookDir = 'front'; settings.hookYaw = 90; settings.ringYaw = 90; }   // v18: フック真ん中固定・右開き 90°
 if ((storedSettings.v ?? 1) < 19) { settings.reflect = true; if (!(settings.twist > 0)) settings.twist = 0.5; }   // v19: 映り込みオン・揺れでリングが回るを中で既定オン
 delete settings.hint;   // ヒントモードは廃止
-settings.v = 20;
+if (savedSettings && (storedSettings.v ?? 1) < 21) { settings.chain = Math.max(settings.chain, DEFAULT_CHAIN); settings.swing = Math.max(settings.swing, DEFAULTS.swing); }   // v21: もっと揺れる既定に
+settings.v = 21;
 localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const saveSettings = () => localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const statKey = () => {
@@ -685,6 +688,7 @@ const swingResponse = value => {
   return 1 - (1 - v) ** 2;
 };
 const effSwing = () => isHighDifficulty() ? 1 : swingResponse(isEasyDifficulty() ? Math.min(settings.swing, 0.35) : settings.swing);
+const effSwingKick = () => 0.4 + 0.6 * effSwing();   // 揺れやすさが低いとガクッも弱い
 const effTwist = () => isHighDifficulty() ? 1 : isEasyDifficulty() ? 0 : settings.twist;
 // 向き: 通常は設定値（既定 90°）。難易度「大」か「配置変更」ボタンを押したラウンドはランダム
 const randomYaw = () => Math.round(Math.random() * 72) * 5 - 180;
@@ -911,7 +915,14 @@ function control(dt) {
     const targetSpeed = isHighDifficulty() ? 1 : isEasyDifficulty() ? 0 : settings.speed;
     const target = (want[k] || 0) * SPEEDS[targetSpeed];
     const dv = target - game.vel[k];
-    game.vel[k] += Math.max(-ACCEL * dt, Math.min(ACCEL * dt, dv));
+    const step = Math.max(-ACCEL * dt, Math.min(ACCEL * dt, dv));
+    game.vel[k] += step;
+    // 実機のガントリーは動き出し・止まりで「ガクッ」と揺れ、リングに余分な勢いが乗る。
+    // 速度の変化と逆向き（慣性の向き）にリングと付け根を少し押す
+    if (ring && Math.abs(step) > 1e-6 && !['descend', 'bottom', 'lift', 'hold'].includes(game.state)) {
+      const jolt = -step * JOLT * effSwingKick();
+      ring.velocity[k] += jolt; shackle.velocity[k] += jolt;
+    }
   }
   let vx = game.vel.x, vz = game.vel.z;
   const mr = moveRange();

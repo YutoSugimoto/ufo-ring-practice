@@ -46,7 +46,7 @@ const HOOK = { stemTop: 0.62, apexY: 0.82, apexZ: 0.26, endY: 0.7, endZ: 0.46, t
 const GR = { STATIC: 1, RACK: 2, PRIZE: 4, HEAD: 8, RING: 16, HOOK: 32, SHELF: 64 };
 
 // ---------------------------------------------------------------- 設定・記録
-const DEFAULTS = { floorMu: 0.03, chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.75, random: true, pip: true };
+const DEFAULTS = { marker: true, floorMu: 0.03, chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.75, random: true, pip: true };
 const savedSettings = localStorage.getItem('ufo-hook-settings');
 const settings = Object.assign({}, DEFAULTS, JSON.parse(savedSettings || '{}'));
 // スマホの初回は重い映り込みをオフにしておく
@@ -636,6 +636,23 @@ scene.add(new THREE.Line(wireGeo, new THREE.LineBasicMaterial({ color: 0x888888 
 const carriageMesh = box(0.8, 0.3, 0.8, M.metal); scene.add(carriageMesh);
 const crossRail = box(0.14, 0.12, RANGE.zMax - RANGE.zMin + 0.8, M.metal); scene.add(crossRail);
 
+// ---------------------------------------------------------------- 落下予測地点（赤い印）
+// 今リングを真下に下ろしたら、リングの一番下が板（または床）に着く位置
+const marker = new THREE.Group();
+{
+  const dot = new THREE.Mesh(new THREE.CircleGeometry(0.1, 24), new THREE.MeshBasicMaterial({ color: 0xff2040, transparent: true, opacity: 0.9, depthWrite: false }));
+  const halo = new THREE.Mesh(new THREE.RingGeometry(0.15, 0.21, 32), new THREE.MeshBasicMaterial({ color: 0xff2040, transparent: true, opacity: 0.55, depthWrite: false }));
+  for (const m of [dot, halo]) { m.rotation.x = -Math.PI / 2; m.renderOrder = 5; marker.add(m); }
+  scene.add(marker);
+}
+function updateMarker() {
+  marker.visible = !!(settings.marker && ring && ['idle', 'fixed1', 'fixed2', 'free', 'wait', 'descend'].includes(game.state));
+  if (!marker.visible) return;
+  const p = ringLowest().p;
+  const onShelf = p.x > SHELF.xMin && p.x < SHELF.xMax && p.z > SHELF.zMin && p.z < SHELF.zMax;
+  marker.position.set(p.x, (onShelf ? SHELF.topY : 0) + 0.012, p.z);
+}
+
 // ---------------------------------------------------------------- ゲーム状態
 const game = {
   state: 'idle', t: 0, L: L_HOME,
@@ -746,7 +763,7 @@ function judgeCatch() {
 }
 
 // フック（柱→アーチ→先端）のどこかがリング面を「穴の内側」で貫いているか
-function threadTest(n) {
+function threadTest(n, hanging = false) {
   const { hook, lay } = round, d = lay.dir, H = HOOK;
   const pts = [V(0, -0.1, 0), V(0, H.stemTop, 0), V(0, H.apexY, d * H.apexZ), V(0, H.endY, d * H.endZ), V(0, H.tipY, d * H.endZ)]
     .map(p => hook.pointToWorldFrame(p));
@@ -755,7 +772,7 @@ function threadTest(n) {
   const od = hook.quaternion.vmult(V(0, 0, d));
   if (c.vsub(pts[0]).dot(od) < 0.05) return null;
   // フックの上に乗っている（めり込んでいる）だけのリングは掛かっていない: 輪の最下点がアーチより下まで下りていること
-  if (ringLowest().p.y - SHELF.topY > HOOK.tipY + 0.05) return null;   // 先端より下まで潜っていること
+  if (!hanging && ringLowest().p.y - SHELF.topY > HOOK.tipY + 0.05) return null;   // 先端より下まで潜っていること（引っ掛かって吊られている時は除く）
   for (let i = 0; i < pts.length - 1; i++) {
     const a = pts[i], b = pts[i + 1];
     const da = a.vsub(c).dot(n), db = b.vsub(c).dot(n);
@@ -833,18 +850,24 @@ function control(dt) {
     }
     case 'bottom':    // 下降停止 → 一瞬止まってから上昇
       if (game.t > 0.6) {
-        game.catch = judgeCatch();
-        if (game.catch) attachRing(game.catch);
+        judgeCatch();   // 位置情報の記録だけ（掛かったかどうかは引き上げ中の実際の接触で決める）
+        game.catch = null;
         setState('lift');
       }
       break;
     case 'lift':
       game.L = Math.max(L_HOME, game.L - LIFT_SPEED * dt);
-      // 引き上げで板の上を引きずられたリングが、フックの穴に滑り込んだら掛かる
-      // （下降停止の時点でリングがフックの開いている側にあった場合だけ。裏側から引きずられて被さるのは掛からない）
-      if (!game.catch && game.t < 2.0 && (game.lastJudge?.s ?? -1) >= 0.05 && ringLowest().p.y - SHELF.topY < HOOK.tipY) {
-        const th = threadTest(ringLowest().n);
-        if (th) { game.catch = { deep: th.deep, slipTilt: 14 + Math.random() * 24, late: true }; attachRing(game.catch); }
+      // 掛かり判定は引き上げ中だけ: フックがリングの穴を通っていて、しかもリングが実際にフックに
+      // 引っ掛かって（接触して）引っ張っているときに初めて「掛かった」とする。見た目で掛かっていないものは取れない
+      if (!game.catch && (game.lastJudge?.s ?? -1) >= 0.05) {
+        // フックがリングを「下向きに」押している接触（＝アーチの下側に引っ掛かって上がれない）があること
+        const pulled = world.contacts.some(c => {
+          if (!((c.bi === ring && c.bj === round.hook) || (c.bj === ring && c.bi === round.hook))) return false;
+          const ny = c.bi === ring ? -c.ni.y : c.ni.y;   // リングが受ける力の向き
+          return ny < -0.3;
+        });
+        const th = pulled ? threadTest(ringLowest().n, true) : null;
+        if (th) { game.catch = { deep: true, slipTilt: 90 }; attachRing(game.catch); }
       }
       // 網台が上限まで上がったらそこで上昇停止（チェーンが張ってアームが止まる）
       if (game.L <= L_HOME || round.theta >= MAX_TILT - 1e-3) setState('hold');
@@ -1032,7 +1055,7 @@ function bindSettings() {
   rnd.onchange = () => { settings.random = rnd.checked; saveSettings(); resetRound(); rnd.blur(); };
   const pip = $('pip'); pip.checked = settings.pip; document.body.classList.toggle('pip', settings.pip);
   pip.onchange = () => { settings.pip = pip.checked; saveSettings(); document.body.classList.toggle('pip', settings.pip); resize(); pip.blur(); };
-  for (const key of ['reflect', 'grid']) {
+  for (const key of ['reflect', 'grid', 'marker']) {
     const el = $(key); el.checked = settings[key];
     el.onchange = () => { settings[key] = el.checked; saveSettings(); applyShelfOptions(); el.blur(); };
   }
@@ -1151,6 +1174,7 @@ function frame(now) {
 
   for (const { body, obj } of synced) { obj.position.copy(body.position); obj.quaternion.copy(body.quaternion); }
   updateChainVisual();
+  updateMarker();
   carriageMesh.position.set(carriage.position.x, CARRIAGE_Y + 0.15, carriage.position.z);
   crossRail.position.set(carriage.position.x, CARRIAGE_Y + 0.35, (RANGE.zMin + RANGE.zMax) / 2);
   const pos = wireGeo.attributes.position;

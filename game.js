@@ -46,7 +46,7 @@ const HOOK = { stemTop: 0.62, apexY: 0.82, apexZ: 0.26, endY: 0.7, endZ: 0.46, t
 const GR = { STATIC: 1, RACK: 2, PRIZE: 4, HEAD: 8, RING: 16, HOOK: 32, SHELF: 64 };
 
 // ---------------------------------------------------------------- 設定・記録
-const DEFAULTS = { chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0, swing: 0.75, random: true, pip: true };
+const DEFAULTS = { floorMu: 0.03, chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0, swing: 0.75, random: true, pip: true };
 const savedSettings = localStorage.getItem('ufo-hook-settings');
 const settings = Object.assign({}, DEFAULTS, JSON.parse(savedSettings || '{}'));
 // スマホの初回は重い映り込みをオフにしておく
@@ -92,7 +92,10 @@ const cm = (a, b, friction, restitution = 0.05) =>
 cm(mat.prize, mat.rack, 0.12);
 cm(mat.prize, mat.stat, 0.45);
 cm(mat.ring, mat.hook, 0.2, 0);
-cm(mat.ring, mat.shelf, 0.05, 0);    // アクリル板はよく滑る（着地後、リングの下側は板の上を滑り、チェーンの支点は固定のまま傾く）
+// アクリル板とリングの摩擦（設定「床の滑りやすさ」で切り替え）。既定はよく滑る:
+// 着地後、リングの付け根（チェーンの支点）は落ちた位置から動かず、板に着いた先端側が滑って倒れる
+const ringShelfCM = new CANNON.ContactMaterial(mat.ring, mat.shelf, { friction: 0.03, restitution: 0 });
+world.addContactMaterial(ringShelfCM);
 cm(mat.hook, mat.shelf, 0.5, 0);
 
 const V = (x, y, z) => new CANNON.Vec3(x, y, z);
@@ -662,6 +665,7 @@ function resetRound() {
 }
 
 function applyPhysicsSettings() {
+  ringShelfCM.friction = settings.floorMu;
   // 向きのバーは待機中ならその場で反映
   if (round && game.state === 'idle') {
     round.hook.quaternion.copy(yawQ(settings.hookYaw));
@@ -740,6 +744,9 @@ function threadTest(n) {
   const pts = [V(0, -0.1, 0), V(0, H.stemTop, 0), V(0, H.apexY, d * H.apexZ), V(0, H.endY, d * H.endZ), V(0, H.tipY, d * H.endZ)]
     .map(p => hook.pointToWorldFrame(p));
   const c = ring.position, inner = ringR - TUBE - HOOK.w - 0.02;
+  // フックの穴は開いている側からしか入れない。反対側（柱の裏）から被さったリングは掛からない
+  const od = hook.quaternion.vmult(V(0, 0, d));
+  if (c.vsub(pts[0]).dot(od) < 0.05) return null;
   for (let i = 0; i < pts.length - 1; i++) {
     const a = pts[i], b = pts[i + 1];
     const da = a.vsub(c).dot(n), db = b.vsub(c).dot(n);
@@ -868,6 +875,11 @@ function control(dt) {
   trackTouchdown();
   updateRack(dt);
   updateCatch(dt);
+  // 下ろしてチェーンがたるんだら、リングの付け根はアームの真下（落ちた位置）に留まる
+  if (['descend', 'bottom'].includes(game.state) && head.position.distanceTo(shackle.position) < rope.distance - 0.03) {
+    shackle.position.x = head.position.x; shackle.position.z = head.position.z;
+    shackle.velocity.x = 0; shackle.velocity.z = 0;
+  }
 
   // 実機の微振動。チェーンがたるんで縁で立ったリングは、わずかな揺れでどちらかへ倒れる
   if (ring) {
@@ -982,6 +994,7 @@ function bindSettings() {
     el.onchange = () => el.blur();
   };
   slider('swing', 'swing', v => ['ほぼ無し', '小', '中', '大', '最大'][Math.round(v * 4)]);
+  slider('floorMu', 'floorMu', v => `μ=${v.toFixed(2)}${v <= 0.05 ? '（よく滑る）' : v >= 0.4 ? '（滑らない）' : ''}`);
   const ch = $('chain'), chOut = $('chainVal');
   updateChainRange();
   ch.oninput = () => { settings.chain = parseFloat(ch.value); chOut.textContent = `${Math.round(settings.chain * 10)} cm`; saveSettings(); };

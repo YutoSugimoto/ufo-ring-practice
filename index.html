@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#f3f1f6">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="リング練習">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg">
+<title>リング × フック UFOキャッチャー練習</title>
+<link rel="stylesheet" href="style.css?v=20261025d">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+    "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div id="settings" class="panel">
+  <div class="title" id="settingsToggle">⚙ 設定 <span class="caret">▾</span></div>
+  <div class="body">
+    <label>操作モード
+      <select id="mode">
+        <option value="fixed">固定移動ボタン（①→②）</option>
+        <option value="free">フリースティック</option>
+      </select>
+    </label>
+    <div class="row">リング
+      <label class="chip"><input type="radio" name="size" value="L">大</label>
+      <label class="chip"><input type="radio" name="size" value="M">中</label>
+      <label class="chip"><input type="radio" name="size" value="S">小</label>
+    </div>
+    <label>リングの揺れやすさ <span id="swingVal"></span>
+      <input type="range" id="swing" min="0" max="1" step="0.05">
+    </label>
+    <label>チェーンの長さ <span id="chainVal"></span>
+      <input type="range" id="chain" min="1.2" max="2.2" step="0.1">
+    </label>
+    <label>網台の重さ <span id="weightVal"></span>
+      <input type="range" id="weight" min="1" max="8" step="0.5">
+    </label>
+    <label>フックの向き（開いている側）
+      <select id="hookDir">
+        <option value="random">ランダム</option>
+        <option value="front">手前に開く</option>
+        <option value="back">奥に開く</option>
+      </select>
+    </label>
+    <label>フックの回転 <span id="hookYawVal"></span>
+      <input type="range" id="hookYaw" min="-180" max="180" step="5">
+    </label>
+    <label>リングの回転 <span id="ringYawVal"></span>
+      <input type="range" id="ringYaw" min="-180" max="180" step="5">
+    </label>
+    <label>揺れでリングが回る <span id="twistVal"></span>
+      <input type="range" id="twist" min="0" max="1" step="0.25">
+    </label>
+    <label class="check"><input type="checkbox" id="random"> フックの位置をランダムにする</label>
+    <label class="check"><input type="checkbox" id="pip"> 横からの小窓を表示</label>
+    <label class="check"><input type="checkbox" id="reflect"> アクリル板の映り込み</label>
+    <label class="check"><input type="checkbox" id="grid"> アクリル板の目盛り線</label>
+    <button id="resetStats" class="small">この条件の記録をリセット</button>
+  </div>
+</div>
+
+<div id="stats" class="panel"></div>
+
+<div id="status"></div>
+<div id="timer"></div>
+<div id="banner"></div>
+
+<div id="controls">
+  <div id="stickArea">
+    <div id="stick"><div id="knob"></div></div>
+  </div>
+  <div id="buttons">
+    <button id="btnReset" class="round sub reset">リセット</button>
+    <button id="btnView" class="round sub">視点</button>
+    <button id="btn1" class="big">①<small>→</small></button>
+    <button id="btn2" class="big">②<small>↑奥</small></button>
+    <button id="btnStart" class="big start">START</button>
+    <button id="btnDrop" class="big drop">↓<small>降下</small></button>
+  </div>
+</div>
+
+<div id="help" class="panel"></div>
+
+<script type="module" src="game.js?v=20261025d"></script>
+</body>
+</html>

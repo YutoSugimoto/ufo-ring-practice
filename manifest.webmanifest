@@ -1,0 +1,10 @@
+{
+  "name": "リング × フック UFOキャッチャー練習",
+  "short_name": "リング練習",
+  "start_url": "./",
+  "display": "fullscreen",
+  "orientation": "portrait",
+  "background_color": "#f3f1f6",
+  "theme_color": "#f3f1f6",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

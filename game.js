@@ -1,0 +1,1027 @@
+// リング × フック設定 UFOキャッチャー練習
+// アームからチェーンでリングがぶら下がっている。アクリル板の上に立つ固定フックの
+// 「開いている側」へリングを滑り込ませ、引き上げ時にフックへ掛かると、
+// フックとチェーンでつながった下の網台が吊り上がって傾き、景品が取り出し口へ落ちる。
+//
+// 単位: 1 = 10cm。重力も 98 (= 9.8 m/s²) にスケールして実機の時間感覚を再現する。
+import * as THREE from 'three';
+import * as CANNON from 'cannon-es';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { Reflector } from 'three/addons/objects/Reflector.js';
+
+// ---------------------------------------------------------------- 定数
+const G = 98;
+const DT = 1 / 180;
+const CAB = { xMin: -4, xMax: 4, zMin: -3, zMax: 3, h: 12.2 };
+const CHUTE_X = -2.1;                 // x < CHUTE_X が取り出し口
+const HOME = { x: -3.0, z: 2.2 };     // アームの初期位置（左手前・取り出し口の上）
+const RANGE = { xMin: -3.2, xMax: 3.3, zMin: -2.5, zMax: 2.3 };
+const CARRIAGE_Y = 11.4;
+const L_HOME = 0.7;
+const MOVE_SPEED = 1.6;               // 16cm/s
+const ACCEL = 30;                     // 実機のガントリーはほぼ急発進・急停止（アーム本体は揺れず、リングだけが振れる）
+const DESCEND_SPEED = 1.4;
+const LIFT_SPEED = 1.0;
+const FREE_TIME = 15;
+
+const RING_SIZES = { L: { R: 0.8, label: '大' }, M: { R: 0.6, label: '中' }, S: { R: 0.45, label: '小' } };
+const TUBE = 0.055;
+
+const HEAD_HY = 0.26;
+const chainDrop = () => HEAD_HY + settings.chain;    // ヘッド中心からリング上端まで
+let NOISE = 0.02;
+let SLACK = 0.12;                   // 下降停止時、リング下端が板より何cm下まで行くか（＝チェーンのたるみ）
+
+const RACK = { len: 3.8, halfZ: 1.4, thick: 0.1, topY: 2.1 };   // 網台。ヒンジは x = CHUTE_X
+const SHELF = { xMin: -1.2, xMax: 3.95, zMin: -2.95, zMax: 2.95, topY: 3.95, thick: 0.1 };
+const HOOK = { stemTop: 0.62, apexY: 0.82, apexZ: 0.26, endY: 0.7, endZ: 0.46, tipY: 0.3, w: 0.045 };
+
+const GR = { STATIC: 1, RACK: 2, PRIZE: 4, HEAD: 8, RING: 16, HOOK: 32, SHELF: 64 };
+
+// ---------------------------------------------------------------- 設定・記録
+const DEFAULTS = { chain: 1.7, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 0, ringYaw: 0, twist: 0, swing: 0.5, weight: 3.0, random: true, pip: true };
+const settings = Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem('ufo-hook-settings') || '{}'));
+// スマホの初回は重い映り込みをオフにしておく
+if (!localStorage.getItem('ufo-hook-settings') && matchMedia('(pointer: coarse)').matches) settings.reflect = false;
+const saveSettings = () => localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
+const statKey = () => `ufo-hook-stats-${settings.mode}-${settings.size}`;
+const loadStats = () => Object.assign({ tries: 0, wins: 0, streak: 0, best: 0 }, JSON.parse(localStorage.getItem(statKey()) || '{}'));
+const saveStats = s => localStorage.setItem(statKey(), JSON.stringify(s));
+
+// ---------------------------------------------------------------- 物理ワールド
+const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -G, 0) });
+world.solver.iterations = 40;
+world.solver.tolerance = 1e-4;
+world.allowSleep = false;
+
+const mat = {
+  stat: new CANNON.Material('static'),
+  rack: new CANNON.Material('rack'),
+  prize: new CANNON.Material('prize'),
+  ring: new CANNON.Material('ring'),
+  hook: new CANNON.Material('hook'),
+  shelf: new CANNON.Material('shelf'),
+};
+world.defaultContactMaterial.friction = 0.3;
+world.defaultContactMaterial.restitution = 0.05;
+const cm = (a, b, friction, restitution = 0.05) =>
+  world.addContactMaterial(new CANNON.ContactMaterial(a, b, { friction, restitution }));
+cm(mat.prize, mat.rack, 0.12);
+cm(mat.prize, mat.stat, 0.45);
+cm(mat.ring, mat.hook, 0.35, 0);
+cm(mat.ring, mat.shelf, 0.2, 0);     // アクリル板はよく滑る
+cm(mat.hook, mat.shelf, 0.5, 0);
+
+const V = (x, y, z) => new CANNON.Vec3(x, y, z);
+const Z_AXIS = V(0, 0, 1);
+const Y_AXIS = V(0, 1, 0);
+const DEG = Math.PI / 180;
+const yawQ = deg => new CANNON.Quaternion().setFromAxisAngle(Y_AXIS, deg * DEG);
+
+// ---------------------------------------------------------------- 描画
+const canvas = document.getElementById('view');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+const IS_TOUCH = matchMedia('(pointer: coarse)').matches;
+renderer.setPixelRatio(Math.min(devicePixelRatio, IS_TOUCH ? 1.5 : 2));   // スマホは描画を軽く
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf3f1f6);
+scene.fog = new THREE.Fog(0xf3f1f6, 30, 55);
+// 映り込み用の環境マップ（金属のリング・フック、アクリル板に周囲が映る）
+{
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+}
+
+const camMain = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
+const camPip = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
+const VIEWS = [
+  { name: '正面', pos: [0, 12.4, 21], look: [0, 5.6, 0] },   // 立った目線でやや上から
+  { name: '右横', pos: [19, 7.6, 0.3], look: [0, 5.2, 0] },
+  { name: '斜め', pos: [12, 12, 13], look: [0, 4.8, 0] },
+  { name: '真上', pos: [0, 21, 0.01], look: [0, 0, 0], noRoof: true },
+];
+let viewIdx = 0;
+const ROOF_LAYER = 1;
+camPip.layers.enable(ROOF_LAYER);
+// 画面の縦横比に合わせて、筐体の横幅が収まる距離までカメラを引く（スマホ縦持ち対応）
+function placeCamera(cam, v) {
+  const look = new THREE.Vector3(...v.look), dir = new THREE.Vector3(...v.pos).sub(look);
+  const d0 = dir.length(); dir.normalize();
+  const tanH = Math.tan(cam.fov * DEG / 2) * cam.aspect;
+  const dist = Math.max(d0, 5.4 / tanH + 3);   // 手前のガラス面（z=3）基準で横幅 ±5.4 が入る距離
+  if (cam.aspect < 0.8 && !v.noRoof) look.y -= 1.2;   // 縦長画面では下の操作ボタンの分だけ筐体を上へ
+  cam.position.copy(look).addScaledVector(dir, dist);
+  cam.lookAt(look);
+}
+function applyView() {
+  const v = VIEWS[viewIdx];
+  placeCamera(camMain, v);
+  if (v.noRoof) camMain.layers.disable(ROOF_LAYER); else camMain.layers.enable(ROOF_LAYER);
+  const p = VIEWS[viewIdx === 1 ? 0 : 1];
+  camPip.position.set(...p.pos); camPip.lookAt(...p.look);
+}
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0xd8d0e0, 0.5));
+const topLight = new THREE.DirectionalLight(0xffffff, 2.6);
+topLight.position.set(0.5, 22, 1.5);   // ほぼ真上 → 板にリングとフックの影が落ちる
+topLight.castShadow = true;
+topLight.shadow.mapSize.set(IS_TOUCH ? 1024 : 2048, IS_TOUCH ? 1024 : 2048);
+Object.assign(topLight.shadow.camera, { left: -6, right: 6, top: 6, bottom: -6, near: 5, far: 30 });
+topLight.shadow.bias = -0.0003;
+topLight.shadow.normalBias = 0.01;
+scene.add(topLight);
+const front = new THREE.DirectionalLight(0xffffff, 0.35);
+front.position.set(2, 6, 14);
+scene.add(front);
+
+const M = {
+  white: new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.45 }),
+  whiteMatte: new THREE.MeshStandardMaterial({ color: 0xf7f7fa, roughness: 0.9 }),
+  floor: new THREE.MeshStandardMaterial({ color: 0xe9e6ef, roughness: 0.85 }),
+  chute: new THREE.MeshStandardMaterial({ color: 0x3a3440, roughness: 0.9 }),
+  pink: new THREE.MeshStandardMaterial({ color: 0xff7eb6, roughness: 0.4 }),
+  led: new THREE.MeshBasicMaterial({ color: 0xffffff }),
+  glass: new THREE.MeshPhysicalMaterial({ color: 0xffffff, transparent: true, opacity: 0.06, roughness: 0, side: THREE.DoubleSide, depthWrite: false }),
+  acrylic: new THREE.MeshPhysicalMaterial({ color: 0xeaf6ff, transparent: true, opacity: 0.22, roughness: 0.02, metalness: 0, clearcoat: 1, envMapIntensity: 1.5, depthWrite: false }),
+  acrylicEdge: new THREE.MeshStandardMaterial({ color: 0xbfe3ff, transparent: true, opacity: 0.7 }),
+  metal: new THREE.MeshStandardMaterial({ color: 0xd0d4dc, metalness: 0.9, roughness: 0.2 }),
+  gold: new THREE.MeshStandardMaterial({ color: 0xf2c200, metalness: 0.85, roughness: 0.25 }),
+  wire: new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 0.3, roughness: 0.35 }),
+  head: new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 0.1, roughness: 0.3 }),
+  ring: new THREE.MeshStandardMaterial({ color: 0xe2e5ec, metalness: 0.95, roughness: 0.12 }),
+};
+const shadowy = m => { m.castShadow = true; m.receiveShadow = true; return m; };
+const box = (w, h, d, m) => shadowy(new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m));
+const cyl = (r, h, m, seg = 12) => shadowy(new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, seg), m));
+let shelfReflector = null, shelfGrid = null;   // アクリル板の映り込み・目盛り線
+
+// ---------------------------------------------------------------- 筐体（静的）
+function addStaticBox(cx, cy, cz, hx, hy, hz, mesh = null, opts = {}) {
+  const b = new CANNON.Body({
+    mass: 0, material: opts.material ?? mat.stat,
+    collisionFilterGroup: opts.group ?? GR.STATIC, collisionFilterMask: opts.mask ?? -1,
+  });
+  b.addShape(new CANNON.Box(V(hx, hy, hz)));
+  b.position.set(cx, cy, cz);
+  world.addBody(b);
+  if (mesh) { const m = box(hx * 2, hy * 2, hz * 2, mesh); m.position.set(cx, cy, cz); scene.add(m); }
+  return b;
+}
+(function buildCabinet() {
+  const W = CAB.xMax - CAB.xMin, D = CAB.zMax - CAB.zMin;
+  // 床（取り出し口部分は穴）
+  addStaticBox((CHUTE_X + CAB.xMax) / 2, -0.1, 0, (CAB.xMax - CHUTE_X) / 2, 0.1, D / 2, M.floor);
+  addStaticBox((CAB.xMin + CHUTE_X) / 2, -2.0, 0, (CHUTE_X - CAB.xMin) / 2, 0.5, D / 2, M.chute);
+  addStaticBox(CHUTE_X + 0.5, -1.1, 0, 0.5, 1.1, D / 2, M.chute);
+  const rim = box(0.1, 0.14, D, M.pink); rim.position.set(CHUTE_X - 0.05, 0.07, 0); scene.add(rim);
+  // 壁（見えない当たり判定＋ガラス）
+  addStaticBox(CAB.xMin - 0.1, CAB.h / 2 - 1, 0, 0.1, CAB.h / 2 + 1, D / 2);
+  addStaticBox(CAB.xMax + 0.1, CAB.h / 2 - 1, 0, 0.1, CAB.h / 2 + 1, D / 2);
+  addStaticBox(0, CAB.h / 2 - 1, CAB.zMin - 0.1, W / 2, CAB.h / 2 + 1, 0.1);
+  addStaticBox(0, CAB.h / 2 - 1, CAB.zMax + 0.1, W / 2, CAB.h / 2 + 1, 0.1);
+  const back = new THREE.Mesh(new THREE.PlaneGeometry(W, CAB.h + 2.4), M.whiteMatte);
+  back.position.set(0, CAB.h / 2 - 1.2, CAB.zMin - 0.02); back.receiveShadow = true; scene.add(back);
+  for (const [x, z, ry, w] of [[CAB.xMin, 0, Math.PI / 2, D], [CAB.xMax, 0, Math.PI / 2, D], [0, CAB.zMax, 0, W]]) {
+    const g = new THREE.Mesh(new THREE.PlaneGeometry(w, CAB.h), M.glass);
+    g.position.set(x, CAB.h / 2, z); g.rotation.y = ry; scene.add(g);
+  }
+  // 白いフレーム・天井・土台
+  for (const x of [CAB.xMin, CAB.xMax]) for (const z of [CAB.zMin, CAB.zMax]) {
+    const p = box(0.22, CAB.h + 2.4, 0.22, M.white); p.position.set(x, CAB.h / 2 - 1.2, z); scene.add(p);
+  }
+  const roof = box(W + 0.6, 0.6, D + 0.6, M.white); roof.position.set(0, CAB.h + 0.3, 0); scene.add(roof);
+  const ledStrip = box(W - 0.4, 0.06, 0.2, M.led); ledStrip.position.set(0, CAB.h - 0.05, CAB.zMax - 0.3); scene.add(ledStrip);
+  const pinkBand = box(W + 0.62, 0.18, 0.05, M.pink); pinkBand.position.set(0, CAB.h + 0.3, CAB.zMax + 0.33); scene.add(pinkBand);
+  // 天井は「真上」視点では描かない（レイヤー 1）。真上のライトの影も落とさない
+  for (const m of [roof, ledStrip, pinkBand]) { m.layers.set(ROOF_LAYER); m.castShadow = false; }
+  const base = box(W + 0.6, 2.4, D + 0.6, M.white); base.position.set(0, -1.42, 0); scene.add(base);
+  const panel = box(W + 0.62, 0.5, 0.05, M.pink); panel.position.set(0, -0.6, CAB.zMax + 0.33); scene.add(panel);
+  // ガントリーのレール
+  for (const z of [RANGE.zMin - 0.3, RANGE.zMax + 0.3]) {
+    const r = box(W - 0.2, 0.12, 0.12, M.metal); r.position.set(0, CARRIAGE_Y + 0.35, z); scene.add(r);
+  }
+  // アクリル板（フックが乗る棚）
+  const sx = (SHELF.xMin + SHELF.xMax) / 2, sz = (SHELF.zMin + SHELF.zMax) / 2;
+  const shx = (SHELF.xMax - SHELF.xMin) / 2, shz = (SHELF.zMax - SHELF.zMin) / 2;
+  addStaticBox(sx, SHELF.topY - SHELF.thick / 2, sz, shx, SHELF.thick / 2, shz, null,
+    { group: GR.SHELF, mask: GR.RING | GR.HOOK | GR.HEAD | GR.PRIZE, material: mat.shelf });
+  const acr = new THREE.Mesh(new THREE.BoxGeometry(shx * 2, SHELF.thick, shz * 2), M.acrylic);
+  acr.position.set(sx, SHELF.topY - SHELF.thick / 2, sz); acr.receiveShadow = true; scene.add(acr);
+  buildShelfSurface(sx, sz, shx * 2, shz * 2);
+  const edge = box(0.04, SHELF.thick + 0.02, shz * 2, M.acrylicEdge); edge.position.set(SHELF.xMin, SHELF.topY - SHELF.thick / 2, sz); scene.add(edge);
+  const edge2 = box(shx * 2, SHELF.thick + 0.02, 0.04, M.acrylicEdge); edge2.position.set(sx, SHELF.topY - SHELF.thick / 2, SHELF.zMax); scene.add(edge2);
+  // 板を支える白い金具
+  for (const z of [SHELF.zMin + 0.2, SHELF.zMax - 0.2]) {
+    const b = box(0.1, SHELF.topY - 0.1, 0.1, M.white); b.position.set(SHELF.xMax - 0.05, (SHELF.topY - 0.1) / 2, z); scene.add(b);
+  }
+  // 網台を下から支える支柱とヒンジ台座
+  addStaticBox(1.4, (RACK.topY - RACK.thick - 0.02) / 2, 0, 0.15, (RACK.topY - RACK.thick - 0.02) / 2, 0.3, M.white,
+    { mask: GR.RACK | GR.PRIZE });
+  const ped = box(0.16, RACK.topY - 0.1, 0.5, M.white);
+  ped.position.set(CHUTE_X + 0.02, (RACK.topY - 0.1) / 2 - 0.05, 0); scene.add(ped);
+  const axle = cyl(0.06, RACK.halfZ * 2 + 0.3, M.metal, 16);
+  axle.rotation.x = Math.PI / 2; axle.position.set(CHUTE_X, RACK.topY - RACK.thick / 2, 0); scene.add(axle);
+  const label = makeLabel('GET!', '#ff4f9a');
+  label.position.set((CAB.xMin + CHUTE_X) / 2, 0.03, CAB.zMax - 0.6); label.rotation.x = -Math.PI / 2; scene.add(label);
+})();
+
+function makeLabel(text, color) {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 128;
+  const g = c.getContext('2d');
+  g.fillStyle = color; g.font = 'bold 72px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(text, 128, 64);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  return new THREE.Mesh(new THREE.PlaneGeometry(1.6, 0.8), new THREE.MeshBasicMaterial({ map: t, transparent: true }));
+}
+
+// アクリル板の上面: 映り込み（Reflector）・影だけを描く面・目盛り線
+function buildShelfSurface(cx, cz, w, d) {
+  const y = SHELF.topY;
+  // 映り込み。Reflector は不透明なので、シェーダーの α を下げて半透明にする
+  shelfReflector = new Reflector(new THREE.PlaneGeometry(w, d), {
+    textureWidth: 1024, textureHeight: 1024, color: 0xffffff, clipBias: 0.003,
+  });
+  shelfReflector.material.fragmentShader = shelfReflector.material.fragmentShader
+    .replace('vec4( blendOverlay( base.rgb, color ), 1.0 )', 'vec4( blendOverlay( base.rgb, color ), 0.2 )');
+  shelfReflector.material.transparent = true;
+  shelfReflector.material.depthWrite = false;
+  shelfReflector.rotation.x = -Math.PI / 2;
+  shelfReflector.position.set(cx, y + 0.002, cz);
+  shelfReflector.renderOrder = 1;
+  scene.add(shelfReflector);
+  // 影だけを受ける透明な面（透明なアクリルでも影がくっきり見える）
+  const shadowPlane = new THREE.Mesh(new THREE.PlaneGeometry(w, d), new THREE.ShadowMaterial({ opacity: 0.32 }));
+  shadowPlane.rotation.x = -Math.PI / 2; shadowPlane.position.set(cx, y + 0.004, cz);
+  shadowPlane.receiveShadow = true; shadowPlane.renderOrder = 2;
+  scene.add(shadowPlane);
+  // 目盛り線（0.5 = 5cm ごと）
+  const c = document.createElement('canvas'), px = 64;
+  c.width = Math.round(w / 0.5) * px; c.height = Math.round(d / 0.5) * px;
+  const g = c.getContext('2d');
+  g.strokeStyle = 'rgba(80,150,210,0.45)'; g.lineWidth = 2;
+  for (let x = 0; x <= c.width; x += px) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, c.height); g.stroke(); }
+  for (let z = 0; z <= c.height; z += px) { g.beginPath(); g.moveTo(0, z); g.lineTo(c.width, z); g.stroke(); }
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8;
+  shelfGrid = new THREE.Mesh(new THREE.PlaneGeometry(w, d), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false }));
+  shelfGrid.rotation.x = -Math.PI / 2; shelfGrid.position.set(cx, y + 0.006, cz); shelfGrid.renderOrder = 3;
+  scene.add(shelfGrid);
+}
+function applyShelfOptions() {
+  if (shelfReflector) shelfReflector.visible = settings.reflect;
+  if (shelfGrid) shelfGrid.visible = settings.grid;
+}
+
+// ---------------------------------------------------------------- 動的オブジェクトの管理
+const synced = [];   // { body, obj }
+function link(body, obj) { synced.push({ body, obj }); scene.add(obj); }
+function unlink(body) {
+  const i = synced.findIndex(s => s.body === body);
+  if (i >= 0) { scene.remove(synced[i].obj); synced.splice(i, 1); }
+  world.removeBody(body);
+}
+
+// ---------------------------------------------------------------- 網台・フック・景品（毎ラウンド作り直す）
+const HINGE = { x: CHUTE_X, y: RACK.topY - RACK.thick / 2 };
+const MAX_TILT = 35 * Math.PI / 180;
+let round = null;   // { rack, hook, chain, prize, lay, theta }
+
+function randomLayout() {
+  if (game.forceLayout) return { ...game.forceLayout };
+  // フックの開いている側（+1: 手前 / -1: 奥）
+  const dir = settings.hookDir === 'front' ? 1 : settings.hookDir === 'back' ? -1 : (Math.random() < 0.5 ? 1 : -1);
+  if (!settings.random) return { x: 0.9, z: 0.0, dir };
+  return { x: 0.3 + Math.random() * 1.0, z: -1.0 + Math.random() * 1.8, dir };
+}
+
+function buildRack(lay) {
+  // 原点＝板の中心（≒重心）。左端がヒンジ。
+  const cx = CHUTE_X + RACK.len / 2, cy = RACK.topY - RACK.thick / 2;
+  // 網台は「フックの高さ」から角度を決める運動学的な剛体（重さはフックに掛かる力として扱う）
+  const body = new CANNON.Body({
+    mass: 0, type: CANNON.Body.KINEMATIC, material: mat.rack, position: V(cx, cy, 0),
+    collisionFilterGroup: GR.RACK, collisionFilterMask: GR.PRIZE,
+  });
+  body.addShape(new CANNON.Box(V(RACK.len / 2, RACK.thick / 2, RACK.halfZ)));
+  // 景品止めの低い枠（奥・手前のみ）
+  for (const s of [-1, 1]) body.addShape(new CANNON.Box(V(RACK.len / 2, 0.12, 0.03)), V(0, RACK.thick / 2 + 0.12, s * (RACK.halfZ - 0.03)));
+  body.updateMassProperties();
+
+  const obj = new THREE.Group();
+  const wireR = 0.018;
+  for (let x = -RACK.len / 2; x <= RACK.len / 2 + 1e-6; x += 0.3) {
+    const w = cyl(wireR, RACK.halfZ * 2, M.wire, 6); w.rotation.x = Math.PI / 2; w.position.set(x, RACK.thick / 2, 0); obj.add(w);
+  }
+  for (let z = -RACK.halfZ; z <= RACK.halfZ + 1e-6; z += 0.3) {
+    const w = cyl(wireR, RACK.len, M.wire, 6); w.rotation.z = Math.PI / 2; w.position.set(0, RACK.thick / 2 - 0.03, z); obj.add(w);
+  }
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(RACK.len, 0.04, RACK.halfZ * 2), new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true, opacity: 0.25 }));
+  frame.position.y = RACK.thick / 2 - 0.04; obj.add(frame);
+  for (const s of [-1, 1]) {
+    const w = cyl(0.03, RACK.len, M.wire, 6); w.rotation.z = Math.PI / 2; w.position.set(0, RACK.thick / 2 + 0.24, s * (RACK.halfZ - 0.03)); obj.add(w);
+    for (let x = -RACK.len / 2; x <= RACK.len / 2 + 1e-6; x += 0.6) {
+      const p = cyl(wireR, 0.24, M.wire, 6); p.position.set(x, RACK.thick / 2 + 0.12, s * (RACK.halfZ - 0.03)); obj.add(p);
+    }
+  }
+  world.addBody(body);
+  link(body, obj);
+  return { body, attachLocal: V(lay.x - cx, RACK.thick / 2, lay.z) };
+}
+
+function buildHook(lay) {
+  // 原点＝台座の中心（アクリル板の上面）。柱が上へ伸び、上端が dir 側へアーチ状に曲がって
+  // 先端が下に垂れる「？」形。アーチの外側に落ちたリングは外へ滑って傾き、
+  // 先端の下からリングがくぐると、引き上げ時にアーチの内側に掛かる。
+  const d = lay.dir, { stemTop, apexY, apexZ, endY, endZ, tipY, w } = HOOK;
+  const body = new CANNON.Body({
+    mass: 0.6, material: mat.hook, fixedRotation: true, position: V(lay.x, SHELF.topY, lay.z),
+    collisionFilterGroup: GR.HOOK, collisionFilterMask: GR.SHELF | GR.RING | GR.HEAD,
+    linearDamping: 0.2,
+  });
+  body.quaternion.copy(yawQ(settings.hookYaw));   // バーで設定した向き（縦軸まわり）
+  const P = [V(0, 0.08, 0), V(0, stemTop, 0), V(0, apexY, d * apexZ), V(0, endY, d * endZ), V(0, tipY, d * endZ)];
+  body.addShape(new CANNON.Box(V(0.2, 0.04, 0.2)), V(0, 0.04, 0));   // 台座
+  for (let i = 0; i < P.length - 1; i++) {
+    const a = P[i], b = P[i + 1], dir = b.vsub(a), len = dir.length();
+    dir.normalize();
+    const q = new CANNON.Quaternion().setFromVectors(V(0, 0, 1), dir);
+    body.addShape(new CANNON.Box(V(w, w, len / 2)), a.vadd(b).scale(0.5), q);
+    body.addShape(new CANNON.Sphere(w * (i === P.length - 2 ? 1.3 : 1.15)), b);
+  }
+  body.updateMassProperties();
+
+  const obj = new THREE.Group();
+  const baseM = shadowy(new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.22, 0.08, 24), M.gold)); baseM.position.y = 0.04; obj.add(baseM);
+  // 曲がったフックを TubeGeometry で
+  const pts = [
+    new THREE.Vector3(0, 0.08, 0),
+    new THREE.Vector3(0, stemTop - 0.05, 0),
+    new THREE.Vector3(0, apexY, d * apexZ),
+    new THREE.Vector3(0, endY - 0.02, d * endZ),
+    new THREE.Vector3(0, tipY, d * endZ),
+  ];
+  const curve = new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.5);
+  obj.add(shadowy(new THREE.Mesh(new THREE.TubeGeometry(curve, 48, w, 10), M.gold)));
+  const tipBall = shadowy(new THREE.Mesh(new THREE.SphereGeometry(w * 1.25, 12, 8), M.gold));
+  tipBall.position.set(0, tipY, d * endZ); obj.add(tipBall);
+  world.addBody(body);
+  link(body, obj);
+  return body;
+}
+
+// チェーンの見た目（毎フレーム両端を結び直す）
+function makeChainMesh(n, material, r = 0.05) {
+  const obj = new THREE.Group();
+  for (let i = 0; i < n; i++) {
+    const l = shadowy(new THREE.Mesh(new THREE.TorusGeometry(r, r * 0.32, 6, 12), material));
+    l.rotation.y = i % 2 ? Math.PI / 2 : 0;
+    obj.add(l);
+  }
+  scene.add(obj);
+  return obj;
+}
+const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _d = new THREE.Vector3(), _up = new THREE.Vector3(0, 1, 0);
+function placeChainMesh(obj, a, b) {
+  _a.set(a.x, a.y, a.z); _b.set(b.x, b.y, b.z);
+  const len = _a.distanceTo(_b);
+  obj.position.copy(_a).add(_b).multiplyScalar(0.5);
+  if (len > 1e-4) obj.quaternion.setFromUnitVectors(_up, _d.copy(_a).sub(_b).normalize());
+  const n = obj.children.length;
+  obj.children.forEach((l, i) => { l.position.y = len * (-0.5 + (i + 0.5) / n); l.scale.set(1, Math.max(0.5, len / n / (l.geometry.parameters.radius * 2)), 1); });
+}
+const _p = new CANNON.Vec3();
+function updateChainVisual() {
+  if (!round) return;
+  placeChainMesh(round.chain, round.hook.position, round.rack.pointToWorldFrame(round.attachLocal, _p));
+  head.pointToWorldFrame(V(0, -HEAD_HY, 0), _p);
+  placeChainMesh(armChain, _p, shackle.position);
+}
+
+// 網台の角度をフックの高さから決め、フックには台の重さ分の下向きの力をかける
+function updateRack(dt) {
+  const { rack, hook, lay } = round;
+  // フックはチェーンが板の穴を通っているので水平には動かない
+  hook.position.x = lay.x; hook.position.z = lay.z;
+  hook.velocity.x = 0; hook.velocity.z = 0;
+  const lever = lay.x - CHUTE_X;
+  let rise = hook.position.y - SHELF.topY;
+  const maxRise = lever * Math.sin(MAX_TILT);
+  if (rise > maxRise) { hook.position.y = SHELF.topY + maxRise; hook.velocity.y = Math.min(0, hook.velocity.y); rise = maxRise; }
+  const theta = Math.asin(Math.max(0, rise) / lever);
+  const w = (theta - round.theta) / dt;
+  round.theta = theta;
+  // 台の重さ（＋景品の重さを少し）→ チェーンの張力としてフックを下に引く
+  const comLever = RACK.len / 2;
+  hook.force.y -= settings.weight * G * comLever / lever;
+  const c = Math.cos(theta), s = Math.sin(theta);
+  const rx = comLever * c, ry = comLever * s;
+  rack.position.set(HINGE.x + rx, HINGE.y + ry, 0);
+  rack.quaternion.setFromAxisAngle(Z_AXIS, theta);
+  rack.velocity.set(-w * ry, w * rx, 0);
+  rack.angularVelocity.set(0, 0, w);
+  // 網台の上の景品は傾くと滑り落ちる（ソルバーの静止摩擦が強すぎるので斜面方向の力で補う）
+  const p = round.prize;
+  if (theta > 8 * DEG && p.position.x > CHUTE_X - 0.2 && p.position.y > RACK.topY - 0.5) {
+    const f = p.mass * G * Math.sin(theta) * 0.7;
+    p.force.x -= f * c; p.force.y -= f * s;
+  }
+}
+
+// 景品「おすがた」フィギュア
+function buildPrize() {
+  const body = new CANNON.Body({
+    mass: 0.8, material: mat.prize,
+    position: V(-1.3, RACK.topY + 0.62, settings.random ? (Math.random() * 2 - 1) * 0.3 : 0),
+    collisionFilterGroup: GR.PRIZE, collisionFilterMask: GR.STATIC | GR.RACK | GR.PRIZE | GR.HEAD | GR.RING | GR.SHELF,
+    angularDamping: 0.1,
+  });
+  body.addShape(new CANNON.Box(V(0.4, 0.06, 0.4)), V(0, -0.56, 0));
+  body.addShape(new CANNON.Box(V(0.28, 0.42, 0.24)), V(0, -0.08, 0));
+  body.addShape(new CANNON.Sphere(0.34), V(0, 0.62, 0));
+  const obj = new THREE.Group();
+  const hue = Math.random();
+  const mBody = new THREE.MeshStandardMaterial({ color: new THREE.Color().setHSL(hue, 0.6, 0.62), roughness: 0.6 });
+  const mSkin = new THREE.MeshStandardMaterial({ color: 0xffe3d2, roughness: 0.7 });
+  const mHair = new THREE.MeshStandardMaterial({ color: new THREE.Color().setHSL((hue + 0.5) % 1, 0.45, 0.4), roughness: 0.6 });
+  const mDark = new THREE.MeshStandardMaterial({ color: 0x222222 });
+  const mCheek = new THREE.MeshStandardMaterial({ color: 0xff9fb8 });
+  const base = shadowy(new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.44, 0.12, 28), new THREE.MeshPhysicalMaterial({ color: 0xffffff, transparent: true, opacity: 0.6, roughness: 0.1 })));
+  base.position.y = -0.56; obj.add(base);
+  const torso = shadowy(new THREE.Mesh(new THREE.CapsuleGeometry(0.24, 0.42, 6, 16), mBody)); torso.position.y = -0.1; obj.add(torso);
+  const head = shadowy(new THREE.Mesh(new THREE.SphereGeometry(0.34, 24, 16), mSkin)); head.position.y = 0.62; obj.add(head);
+  const hair = shadowy(new THREE.Mesh(new THREE.SphereGeometry(0.36, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.55), mHair));
+  hair.position.y = 0.66; obj.add(hair);
+  for (const s of [-1, 1]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.045, 10, 8), mDark); eye.position.set(s * 0.12, 0.6, 0.31); obj.add(eye);
+    const cheek = new THREE.Mesh(new THREE.SphereGeometry(0.04, 10, 8), mCheek); cheek.position.set(s * 0.2, 0.52, 0.27); obj.add(cheek);
+    const ear = shadowy(new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.22, 12), mHair)); ear.position.set(s * 0.22, 0.98, 0); ear.rotation.z = -s * 0.4; obj.add(ear);
+    const arm = shadowy(new THREE.Mesh(new THREE.CapsuleGeometry(0.07, 0.28, 4, 8), mBody)); arm.position.set(s * 0.32, -0.05, 0.05); arm.rotation.z = s * 0.3; obj.add(arm);
+  }
+  world.addBody(body);
+  link(body, obj);
+  return body;
+}
+
+// ---------------------------------------------------------------- アーム＋ぶら下がりリング
+const carriage = new CANNON.Body({ mass: 0, type: CANNON.Body.KINEMATIC, position: V(HOME.x, CARRIAGE_Y, HOME.z) });
+carriage.collisionFilterGroup = 0; carriage.collisionFilterMask = 0;
+world.addBody(carriage);
+
+// アーム本体はガントリーに固定（キネマティック）。揺れるのはチェーンの先のリングだけ
+const head = new CANNON.Body({
+  mass: 0, type: CANNON.Body.KINEMATIC, position: V(HOME.x, CARRIAGE_Y - L_HOME, HOME.z),
+  collisionFilterGroup: GR.HEAD, collisionFilterMask: GR.STATIC | GR.SHELF | GR.HOOK | GR.PRIZE,
+});
+head.addShape(new CANNON.Box(V(0.42, HEAD_HY, 0.34)));
+head.updateMassProperties();
+world.addBody(head);
+{
+  const g = new THREE.Group();
+  g.add(box(0.84, HEAD_HY * 2, 0.68, M.head));
+  const cap = shadowy(new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.3, 0.25, 20), M.pink)); cap.position.y = HEAD_HY + 0.12; g.add(cap);
+  const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.07, 12, 8), new THREE.MeshBasicMaterial({ color: 0xff5fa8 })); lamp.position.set(0, 0, 0.35); g.add(lamp);
+  // 飾りの閉じた爪
+  for (const s of [-1, 1]) {
+    const c = box(0.07, 0.5, 0.12, M.metal); c.position.set(s * 0.3, -HEAD_HY - 0.22, 0); c.rotation.z = s * 0.25; g.add(c);
+  }
+  link(head, g);
+}
+
+// チェーン: ヘッド → シャックル（リングの吊り金具）を「張ったときだけ効く」ロープで結ぶ。
+// ゆるむとリングはアクリル板やフックの上で自由に倒れる。
+const shackle = new CANNON.Body({ mass: 0.1, linearDamping: 0.02 });
+shackle.addShape(new CANNON.Sphere(0.03));
+shackle.collisionFilterGroup = 0; shackle.collisionFilterMask = 0;
+shackle.updateMassProperties();
+world.addBody(shackle);
+const rope = new CANNON.DistanceConstraint(head, shackle, chainDrop());
+rope.distanceEquation.maxForce = 0;          // 押す力は出さない（ロープ）
+rope.distanceEquation.minForce = -1e6;
+world.addConstraint(rope);
+const armChain = makeChainMesh(24, M.metal, 0.055);
+let ring = null, ringR = 0, ringJoint = null;
+
+function buildRing() {
+  if (ring) { world.removeConstraint(ringJoint); unlink(ring); }
+  const R = RING_SIZES[settings.size].R;
+  ringR = R;
+  const body = new CANNON.Body({
+    mass: 0.6, material: mat.ring,
+    collisionFilterGroup: GR.RING, collisionFilterMask: GR.STATIC | GR.SHELF | GR.HOOK | GR.PRIZE | GR.RACK,
+  });
+  // x-y 平面の輪（正面から丸く見える）。断面が丸くなるよう小球を円周に並べて近似。
+  const N = Math.ceil((2 * Math.PI * R) / (TUBE * 1.5));
+  const ball = new CANNON.Sphere(TUBE);
+  for (let i = 0; i < N; i++) {
+    const a = (i / N) * Math.PI * 2;
+    body.addShape(ball, V(R * Math.cos(a), R * Math.sin(a), 0));
+  }
+  body.updateMassProperties();
+  world.addBody(body);
+  const obj = shadowy(new THREE.Mesh(new THREE.TorusGeometry(R, TUBE, 14, 56), M.ring));
+  link(body, obj);
+  ring = body;
+  ringJoint = new CANNON.PointToPointConstraint(shackle, V(0, 0, 0), ring, V(0, R, 0));
+  world.addConstraint(ringJoint);
+}
+
+// アームを真下にぶら下がった状態で置き直す
+function placeArm(x, z, L) {
+  carriage.position.set(x, CARRIAGE_Y, z); carriage.velocity.setZero();
+  head.position.set(x, CARRIAGE_Y - L, z); head.velocity.setZero();
+  rope.distance = chainDrop();
+  const y = head.position.y - rope.distance;
+  shackle.position.set(x, y, z); shackle.velocity.setZero();
+  ring.position.set(x, y - ringR, z); ring.quaternion.copy(yawQ(settings.ringYaw));
+  ring.velocity.setZero(); ring.angularVelocity.setZero();
+}
+
+// ワイヤー表示
+const wireGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+scene.add(new THREE.Line(wireGeo, new THREE.LineBasicMaterial({ color: 0x888888 })));
+const carriageMesh = box(0.8, 0.3, 0.8, M.metal); scene.add(carriageMesh);
+const crossRail = box(0.14, 0.12, RANGE.zMax - RANGE.zMin + 0.8, M.metal); scene.add(crossRail);
+
+// ---------------------------------------------------------------- ゲーム状態
+const game = {
+  state: 'idle', t: 0, L: L_HOME,
+  vel: { x: 0, z: 0 }, moved: false, timer: FREE_TIME, won: false, finished: false, Ltarget: 3, maxTilt: 0, catch: null, twistDir: 1,
+};
+const input = { b1: false, b2: false, stick: { x: 0, z: 0 }, keys: new Set(), drop: false, start: false };
+
+function setState(s) { game.state = s; game.t = 0; game.moved = false; updateUI(); }
+
+function resetRound() {
+  detachRing();
+  if (round) {
+    for (const b of [round.rack, round.hook, round.prize]) unlink(b);
+    scene.remove(round.chain);
+  }
+  const lay = randomLayout();
+  const rack = buildRack(lay);
+  const hook = buildHook(lay);
+  const prize = buildPrize();
+  round = { rack: rack.body, attachLocal: rack.attachLocal, hook, chain: makeChainMesh(16, M.gold), prize, lay, theta: 0 };
+
+  buildRing();
+  // 下降停止位置（台ごとの固定設定）: リングが真下に垂れていれば、下端が板の SLACK 下に来る深さ
+  const headY = SHELF.topY - SLACK + 2 * ringR + chainDrop();
+  game.Ltarget = CARRIAGE_Y - headY;
+  game.L = L_HOME;
+  placeArm(HOME.x, HOME.z, L_HOME);
+  game.vel = { x: 0, z: 0 }; game.timer = FREE_TIME; game.won = false; game.finished = false; game.maxTilt = 0;
+  game.catch = null; game.touch = null; game.restYaw = settings.ringYaw * DEG; game.twistDir = Math.random() < 0.5 ? 1 : -1;
+  applyPhysicsSettings();
+  hideBanner();
+  setState('idle');
+}
+
+function applyPhysicsSettings() {
+  // 向きのバーは待機中ならその場で反映
+  if (round && game.state === 'idle') {
+    round.hook.quaternion.copy(yawQ(settings.hookYaw));
+    game.restYaw = settings.ringYaw * DEG;
+    placeArm(carriage.position.x, carriage.position.z, game.L);
+  }
+  // 「リングの揺れやすさ」= 空気抵抗・チェーンの摩擦の少なさ
+  if (ring) { ring.angularDamping = 0.5 - 0.47 * settings.swing; ring.linearDamping = 0.45 - 0.43 * settings.swing; }
+}
+
+const rackTilt = () => round ? 2 * Math.atan2(round.rack.quaternion.z, round.rack.quaternion.w) * 180 / Math.PI : 0;
+
+// ---------------------------------------------------------------- 掛かり判定
+// 下降停止の時点でリングがどこにいるか（揺れ・倒れ込みを含めた物理の結果）から判定する。
+//  ・フックの横棒がリングの穴の幅に入っている（左右のズレ）
+//  ・リング下端が先端より下まで下りている（下降停止が早すぎない／フックの上に乗っていない）
+//  ・リング下端がフックの「開いている側」の、先端のすぐ外側にある（滑り込める距離）
+// 先端に近いほど深く掛かり、ギリギリだと浅く掛かって途中で外れやすい。
+// リングの最下点（傾いていても輪の一番低いところ）
+function ringLowest() {
+  const n = ring.quaternion.vmult(V(0, 0, 1));
+  const down = V(n.x * n.y, -1 + n.y * n.y, n.z * n.y);   // 下向きベクトルを輪の面へ射影
+  if (down.length() < 1e-3) down.set(0, -1, 0);
+  down.normalize();
+  return { p: ring.position.vadd(down.scale(ringR)), n };
+}
+// リングが最初にアクリル板（またはフック）に触れた瞬間の揺れの速度を記録する
+function trackTouchdown() {
+  if (!ring || game.touch || !['descend', 'bottom'].includes(game.state)) return;
+  // リング下端がフックの高さまで下りてきた瞬間の速度（＝フックに差しかかる時の振れ）
+  if (ringLowest().p.y - SHELF.topY < HOOK.apexY) game.touch = { v: ring.velocity.clone() };
+}
+
+function judgeCatch() {
+  const { lay } = round, d = lay.dir, R = ringR;
+  const { p: bot, n } = ringLowest();
+  const up = ring.quaternion.vmult(V(0, 1, 0));
+  const h = bot.y - SHELF.topY;
+  // フックの開いている向き（水平）とそれに直交する向き
+  const od = round.hook.quaternion.vmult(V(0, 0, d));
+  const perp = V(od.z, 0, -od.x);
+  const rel = V(bot.x - lay.x, 0, bot.z - lay.z);
+  // 柱から開いている側への距離。リングが傾いていても、先端の高さでリング面がどこにあるかで測る
+  const p0 = V(lay.x, SHELF.topY + (HOOK.tipY + HOOK.endY) / 2, lay.z);
+  const odn = od.dot(n);
+  const s = Math.abs(odn) > 0.2 ? ring.position.vsub(p0).dot(n) / odn : rel.dot(od);
+  const lat = rel.dot(perp);                       // 左右のズレ
+  // 横棒がリングの穴を貫く角度。リング面とフックの向きがずれるほど穴が実質せまくなる
+  const cross = Math.abs(od.dot(n));
+  const halfChord = (Math.sqrt(Math.max(0, R * R - (R - 0.55) ** 2)) - TUBE - 0.05) * cross;
+  const lean = up.dot(od);                         // >0: 上端がフックと反対側へ倒れている
+  // 着地した瞬間の揺れ: フックの穴へ向かって振れていれば（vin>0）先端の下へ「ポンっ」と入りやすい
+  const tv = game.touch?.v ?? ring.velocity;
+  const vin = -(tv.x * od.x + tv.z * od.z);
+  const thread = threadTest(n);
+  const info = { s, h, lat, cross, halfChord, vin, thread: thread ? (thread.deep ? 2 : 1) : 0 };
+  game.lastJudge = info;
+  // ① フックがすでにリングの穴を貫いている（肩越しに掛かっている・振れて潜り込んだ）
+  if (thread) return { deep: thread.deep, slipTilt: 14 + Math.random() * 24 };
+  // ② リングが先端のすぐ外側に立っていて、引き上げ時に先端の下へ滑り込む
+  if (cross < 0.45) return null;                                  // リングの向きがフックと合っていない
+  if (Math.abs(lat) > halfChord) return null;                     // 左右がズレている
+  if (h > HOOK.tipY + 0.12) return null;                          // 下りきっていない・フックの上に乗った
+  if (up.y < 0.5 && lean > 0) return null;                        // 外側へ寝てしまった
+  const lo = HOOK.endZ + 0.03;
+  let hi = HOOK.endZ + 0.15 + 0.45 * R;
+  hi += vin > 0 ? Math.min(0.15, 0.07 * vin) : Math.max(-0.12, 0.05 * vin);   // 振れの向きで届く範囲が変わる
+  if (s < HOOK.apexZ || s > hi) return null;                      // 柱側すぎる／離れすぎ
+  const deep = s < lo + Math.max(0, hi - lo) * (0.55 + Math.max(-0.3, Math.min(0.3, 0.1 * vin)));
+  return { deep, slipTilt: 14 + Math.random() * 24 };
+}
+
+// フック（柱→アーチ→先端）のどこかがリング面を「穴の内側」で貫いているか
+function threadTest(n) {
+  const { hook, lay } = round, d = lay.dir, H = HOOK;
+  const pts = [V(0, 0.1, 0), V(0, H.stemTop, 0), V(0, H.apexY, d * H.apexZ), V(0, H.endY, d * H.endZ), V(0, H.tipY, d * H.endZ)]
+    .map(p => hook.pointToWorldFrame(p));
+  const c = ring.position, inner = ringR - TUBE - HOOK.w - 0.02;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    const da = a.vsub(c).dot(n), db = b.vsub(c).dot(n);
+    if (da * db > 0) continue;
+    const t = da / (da - db);
+    const x = a.vadd(b.vsub(a).scale(t));
+    if (x.vsub(c).length() < inner) return { deep: i <= 1, seg: i };   // 柱・アーチ前半なら深く掛かる
+  }
+  return null;
+}
+
+// 掛かったリングをフックのアーチ内側へ滑り込ませてつなぐ
+function attachRing(c) {
+  const { hook, lay } = round;
+  const pr = V(0, -ringR + TUBE, 0);
+  const wp = ring.pointToWorldFrame(pr);
+  const hp = hook.pointToLocalFrame(wp);
+  c.target = V(0, HOOK.apexY - HOOK.w - TUBE, lay.dir * (HOOK.apexZ + HOOK.endZ) / 2);
+  c.joint = new CANNON.PointToPointConstraint(ring, pr, hook, hp);
+  world.addConstraint(c.joint);
+  ring.collisionFilterMask &= ~GR.HOOK;
+}
+function detachRing() {
+  if (!game.catch?.joint) return;
+  world.removeConstraint(game.catch.joint);
+  game.catch.joint = null;
+}
+function updateCatch(dt) {
+  const j = game.catch?.joint;
+  if (!j) return;
+  // 0.4 秒ほどでアーチの内側まで滑り込む
+  const p = j.pivotB, t = game.catch.target, k = Math.min(1, dt / 0.15);
+  p.x += (t.x - p.x) * k; p.y += (t.y - p.y) * k; p.z += (t.z - p.z) * k;
+}
+
+// ---------------------------------------------------------------- 制御（物理 1 ステップごと）
+function control(dt) {
+  game.t += dt;
+  let want = { x: 0, z: 0 };
+  const cx = carriage.position.x, cz = carriage.position.z;
+  const drop = input.drop; input.drop = false;
+  const start = input.start; input.start = false;
+  game.maxTilt = Math.max(game.maxTilt, rackTilt());
+
+  switch (game.state) {
+    case 'idle':
+      if (settings.mode === 'fixed' && input.b1) setState('fixed1');
+      if (settings.mode === 'free' && (start || drop || Math.hypot(input.stick.x, input.stick.z) > 0.2)) setState('free');
+      break;
+    case 'fixed1':
+      if (input.b1) { want.x = 1; game.moved = true; }
+      if (game.moved && (!input.b1 || cx >= RANGE.xMax - 1e-3)) setState('fixed2');
+      break;
+    case 'fixed2':
+      if (input.b2) { want.z = -1; game.moved = true; }
+      if (game.moved && (!input.b2 || cz <= RANGE.zMin + 1e-3)) setState('wait');
+      break;
+    case 'free':
+      want = { ...input.stick };
+      game.timer -= dt;
+      if (drop || game.timer <= 0) { game.timer = Math.max(0, game.timer); setState('wait'); }
+      break;
+    case 'wait':      // 移動停止 → 少し間をおいて下降開始（この間もリングは揺れている）
+      if (game.t > 0.5) setState('descend');
+      break;
+    case 'descend': {
+      game.L = Math.min(game.Ltarget, game.L + DESCEND_SPEED * dt);
+      if (game.L >= game.Ltarget || (settings.mode === 'free' && drop && game.t > 0.1)) setState('bottom');
+      break;
+    }
+    case 'bottom':    // 下降停止 → 一瞬止まってから上昇
+      if (game.t > 0.6) {
+        game.catch = judgeCatch();
+        if (game.catch) attachRing(game.catch);
+        setState('lift');
+      }
+      break;
+    case 'lift':
+      game.L = Math.max(L_HOME, game.L - LIFT_SPEED * dt);
+      // 浅い掛かりは途中で外れる
+      if (game.catch && !game.catch.deep && rackTilt() >= game.catch.slipTilt) detachRing();
+      // 網台が上限まで上がったらそこで上昇停止（チェーンが張ってアームが止まる）
+      if (game.L <= L_HOME || round.theta >= MAX_TILT - 1e-3) setState('hold');
+      break;
+    case 'hold':
+      if (game.t > 1.8) { detachRing(); setState('return'); }   // リングが外れて網台が戻る
+      break;
+    case 'return': {
+      const dx = HOME.x - cx, dz = HOME.z - cz;
+      want.x = Math.sign(dx) * Math.min(1, Math.abs(dx) * 4);
+      want.z = Math.sign(dz) * Math.min(1, Math.abs(dz) * 4);
+      if (Math.abs(dx) < 0.02 && Math.abs(dz) < 0.02 && Math.hypot(game.vel.x, game.vel.z) < 0.1) setState('result');
+      break;
+    }
+    case 'result':
+      if (!game.finished) { game.finished = true; finishRound(); }
+      // 結果表示中でも①／START／スティックですぐ次のプレイへ
+      if (game.t > 0.3 && (input.b1 || start || drop || Math.hypot(input.stick.x, input.stick.z) > 0.2)) { resetRound(); break; }
+      if (game.t > 2.4) resetRound();
+      break;
+  }
+
+  // キャリッジ（ガントリー）の移動。急停止すると吊られたアームとリングが振り子のように揺れる
+  for (const k of ['x', 'z']) {
+    const target = (want[k] || 0) * MOVE_SPEED;
+    const dv = target - game.vel[k];
+    game.vel[k] += Math.max(-ACCEL * dt, Math.min(ACCEL * dt, dv));
+  }
+  let vx = game.vel.x, vz = game.vel.z;
+  if (cx + vx * dt > RANGE.xMax) { vx = (RANGE.xMax - cx) / dt; game.vel.x = 0; }
+  if (cx + vx * dt < RANGE.xMin) { vx = (RANGE.xMin - cx) / dt; game.vel.x = 0; }
+  if (cz + vz * dt > RANGE.zMax) { vz = (RANGE.zMax - cz) / dt; game.vel.z = 0; }
+  if (cz + vz * dt < RANGE.zMin) { vz = (RANGE.zMin - cz) / dt; game.vel.z = 0; }
+  carriage.velocity.set(vx, 0, vz);
+  // ヘッドはキャリッジの真下、ワイヤー長 L の位置へ（速度で動かして接触も正しく）
+  const ty = CARRIAGE_Y - game.L;
+  head.velocity.set(vx, (ty - head.position.y) / dt, vz);
+  head.position.x = cx; head.position.z = cz;
+  trackTouchdown();
+  updateRack(dt);
+  updateCatch(dt);
+
+  // 実機の微振動。チェーンがたるんで縁で立ったリングは、わずかな揺れでどちらかへ倒れる
+  if (ring) {
+    ring.angularVelocity.x += (Math.random() - 0.5) * NOISE;
+    ring.angularVelocity.z += (Math.random() - 0.5) * NOISE;
+    // 移動中の揺れでチェーンがねじれ、リングの向きが少しずつ回ってしまう（オプション）
+    const sp = Math.hypot(game.vel.x, game.vel.z);
+    if (settings.twist > 0) {
+      if (sp < 0.05 && Math.random() < dt * 0.5) game.twistDir = Math.random() < 0.5 ? 1 : -1;
+      game.restYaw += settings.twist * dt * sp * (0.18 * game.twistDir + (Math.random() - 0.5) * 0.4);
+    }
+    // チェーンのねじれ剛性: 吊られている間はリングの向きを restYaw に戻そうとする
+    const up = ring.quaternion.vmult(V(0, 1, 0));
+    if (up.y > 0.7 && !game.catch?.joint) {
+      const f = ring.quaternion.vmult(V(0, 0, 1));
+      let err = Math.atan2(f.x, f.z) - game.restYaw;
+      err = Math.atan2(Math.sin(err), Math.cos(err));
+      ring.angularVelocity.y += (-40 * err - 4 * ring.angularVelocity.y) * dt;
+    }
+  }
+
+  // 獲得判定
+  const p = round?.prize;
+  if (p && !game.won && p.position.y < 0.9 && p.position.x < CHUTE_X) {
+    game.won = true; showBanner('GET!!', 'win');
+  }
+}
+
+function finishRound() {
+  const s = loadStats();
+  s.tries++;
+  if (game.won) { s.wins++; s.streak++; s.best = Math.max(s.best, s.streak); }
+  else { s.streak = 0; showBanner(game.maxTilt > 3 ? '掛かったけど落ちず…' : 'ざんねん…', 'lose'); }
+  saveStats(s);
+  renderStats();
+}
+
+// ---------------------------------------------------------------- UI
+const $ = id => document.getElementById(id);
+const ui = {
+  status: $('status'), timer: $('timer'), banner: $('banner'), stats: $('stats'), help: $('help'),
+  stickArea: $('stickArea'), btn1: $('btn1'), btn2: $('btn2'), btnStart: $('btnStart'), btnDrop: $('btnDrop'),
+};
+
+function showBanner(text, cls) { ui.banner.textContent = text; ui.banner.className = `show ${cls}`; }
+function hideBanner() { ui.banner.className = ''; }
+
+const STATUS = {
+  idle: () => settings.mode === 'fixed' ? '①ボタンを押している間 → 右へ移動' : 'STARTまたはスティックで開始（制限時間 15秒）',
+  fixed1: () => '①を離すと停止',
+  fixed2: () => '②ボタンを押している間 ↑ 奥へ移動',
+  free: () => 'スティックで移動 → 降下ボタン',
+  wait: () => 'アーム停止…',
+  descend: () => settings.mode === 'free' ? '降下中（降下ボタンで下降停止）' : '降下中…',
+  bottom: () => '下降停止', lift: () => '上昇！', hold: () => '…',
+  return: () => '戻り中', result: () => '',
+};
+function updateUI() {
+  ui.status.textContent = STATUS[game.state]?.() ?? '';
+  const fixed = settings.mode === 'fixed';
+  ui.btn1.classList.toggle('hidden', !fixed);
+  ui.btn2.classList.toggle('hidden', !fixed);
+  ui.stickArea.style.display = fixed ? 'none' : '';
+  ui.btnStart.classList.toggle('hidden', fixed);
+  ui.btnDrop.classList.toggle('hidden', fixed);
+  ui.btn1.disabled = !['idle', 'fixed1'].includes(game.state);
+  ui.btn2.disabled = game.state !== 'fixed2';
+  ui.btnStart.disabled = game.state !== 'idle';
+  ui.btnDrop.disabled = !['free', 'descend'].includes(game.state);
+  $('btnReset').textContent = game.state === 'result' ? '次へ' : 'リセット';
+  ui.help.innerHTML = (fixed
+    ? '<b>キーボード</b><br>① : → / D / 1 （押し続ける）<br>② : ↑ / W / 2 （押し続ける）'
+    : '<b>キーボード</b><br>移動 : 矢印 / WASD（↑が奥）<br>開始 : Enter　降下 / 下降停止 : Space')
+    + '<br>視点切替 : V　やり直し : R<br><br><b>コツ</b><br>フックの<b>開いている側</b>にリングを下ろす。アームは止まってもリングは振れ続けるので、<b>フックの穴に向かって振れながら着地する</b>タイミングで離すと掛かりやすい。横からの小窓で奥行きと振れを確認。';
+}
+function renderStats() {
+  const s = loadStats();
+  const rate = s.tries ? Math.round((s.wins / s.tries) * 100) : 0;
+  ui.stats.innerHTML =
+    `<div>${settings.mode === 'fixed' ? '固定ボタン' : 'フリースティック'} / リング<b>${RING_SIZES[settings.size].label}</b></div>` +
+    `<div>挑戦 <b>${s.tries}</b>　成功 <b>${s.wins}</b>　成功率 <b>${rate}%</b></div>` +
+    `<div>連続 <b>${s.streak}</b>　最高連続 <b>${s.best}</b></div>` +
+    `<div class="dim">視点: ${VIEWS[viewIdx].name}</div>`;
+}
+
+// 設定パネル
+function bindSettings() {
+  $('settingsToggle').onclick = () => $('settings').classList.toggle('collapsed');
+  if (innerWidth < 700) $('settings').classList.add('collapsed');
+  const mode = $('mode'); mode.value = settings.mode;
+  mode.onchange = () => { settings.mode = mode.value; saveSettings(); renderStats(); resetRound(); mode.blur(); };
+  for (const r of document.querySelectorAll('input[name=size]')) {
+    r.checked = r.value === settings.size;
+    r.onchange = () => { settings.size = r.value; saveSettings(); renderStats(); resetRound(); r.blur(); };
+  }
+  const slider = (id, key, fmt) => {
+    const el = $(id), out = $(id + 'Val');
+    el.value = settings[key]; out.textContent = fmt(settings[key]);
+    el.oninput = () => { settings[key] = parseFloat(el.value); out.textContent = fmt(settings[key]); saveSettings(); applyPhysicsSettings(); };
+    el.onchange = () => el.blur();
+  };
+  slider('swing', 'swing', v => ['ほぼ無し', '小', '中', '大', '最大'][Math.round(v * 4)]);
+  const ch = $('chain'), chOut = $('chainVal');
+  ch.value = settings.chain; chOut.textContent = `${Math.round(settings.chain * 10)} cm`;
+  ch.oninput = () => { settings.chain = parseFloat(ch.value); chOut.textContent = `${Math.round(settings.chain * 10)} cm`; saveSettings(); };
+  ch.onchange = () => { ch.blur(); resetRound(); };
+  slider('weight', 'weight', v => `${(v * 0.1).toFixed(2)} kg`);
+  const angleFmt = v => v === 0 ? '0°（正面向き）' : `${Math.abs(v)}° ${v > 0 ? '⟲ 反時計回り' : '⟳ 時計回り'}`;   // 上から見て
+  slider('hookYaw', 'hookYaw', angleFmt);
+  slider('ringYaw', 'ringYaw', angleFmt);
+  slider('twist', 'twist', v => v === 0 ? 'なし' : ['', '少し', '中', '大', '最大'][Math.ceil(v * 4)]);
+  const hd = $('hookDir'); hd.value = settings.hookDir;
+  hd.onchange = () => { settings.hookDir = hd.value; saveSettings(); resetRound(); hd.blur(); };
+  const rnd = $('random'); rnd.checked = settings.random;
+  rnd.onchange = () => { settings.random = rnd.checked; saveSettings(); resetRound(); rnd.blur(); };
+  const pip = $('pip'); pip.checked = settings.pip; document.body.classList.toggle('pip', settings.pip);
+  pip.onchange = () => { settings.pip = pip.checked; saveSettings(); document.body.classList.toggle('pip', settings.pip); pip.blur(); };
+  for (const key of ['reflect', 'grid']) {
+    const el = $(key); el.checked = settings[key];
+    el.onchange = () => { settings[key] = el.checked; saveSettings(); applyShelfOptions(); el.blur(); };
+  }
+  applyShelfOptions();
+  $('resetStats').onclick = () => { localStorage.removeItem(statKey()); renderStats(); };
+}
+
+// 入力：ボタン（押しっぱなし対応）
+function holdButton(el) {
+  const on = e => { e.preventDefault(); if (!el.disabled) el.classList.add('pressed'); };
+  const off = () => el.classList.remove('pressed');
+  el.addEventListener('pointerdown', on);
+  el.addEventListener('pointerup', off);
+  el.addEventListener('pointerleave', off);
+  el.addEventListener('pointercancel', off);
+}
+holdButton(ui.btn1);
+holdButton(ui.btn2);
+ui.btnStart.addEventListener('pointerdown', e => { e.preventDefault(); input.start = true; });
+ui.btnDrop.addEventListener('pointerdown', e => { e.preventDefault(); input.drop = true; });
+// リセット：いつでも今のプレイを中断して次の配置へ（記録には数えない）
+$('btnReset').addEventListener('click', e => { e.currentTarget.blur(); resetRound(); });
+$('btnView').addEventListener('click', () => { viewIdx = (viewIdx + 1) % VIEWS.length; applyView(); renderStats(); });
+
+// バーチャルスティック
+const stickEl = $('stick'), knob = $('knob');
+let stickPointer = null, stickVec = { x: 0, z: 0 };
+function stickMove(e) {
+  const r = stickEl.getBoundingClientRect();
+  const cx = r.left + r.width / 2, cy = r.top + r.height / 2, max = r.width / 2 - 20;
+  let dx = e.clientX - cx, dy = e.clientY - cy;
+  const d = Math.hypot(dx, dy);
+  if (d > max) { dx *= max / d; dy *= max / d; }
+  knob.style.transform = `translate(${dx}px, ${dy}px)`;
+  stickVec = { x: dx / max, z: dy / max };   // 画面上方向 = 奥 (-z)
+}
+stickEl.addEventListener('pointerdown', e => { stickPointer = e.pointerId; stickEl.setPointerCapture(e.pointerId); stickMove(e); });
+stickEl.addEventListener('pointermove', e => { if (e.pointerId === stickPointer) stickMove(e); });
+const stickEnd = e => { if (e.pointerId === stickPointer) { stickPointer = null; stickVec = { x: 0, z: 0 }; knob.style.transform = ''; } };
+stickEl.addEventListener('pointerup', stickEnd);
+stickEl.addEventListener('pointercancel', stickEnd);
+
+// キーボード
+const KEYMAP = { arrowleft: 'l', a: 'l', arrowright: 'r', d: 'r', arrowup: 'u', w: 'u', arrowdown: 'dn', s: 'dn', 1: 'r', 2: 'u' };
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'SELECT') return;
+  const k = KEYMAP[e.key.toLowerCase()];
+  if (k) { input.keys.add(k); e.preventDefault(); }
+  if (e.repeat) return;
+  if (e.key === ' ') { input.drop = true; e.preventDefault(); }
+  if (e.key === 'Enter') input.start = true;
+  if (e.key === 'v' || e.key === 'V') { viewIdx = (viewIdx + 1) % VIEWS.length; applyView(); renderStats(); }
+  if (e.key === 'r' || e.key === 'R') resetRound();
+});
+addEventListener('keyup', e => { const k = KEYMAP[e.key.toLowerCase()]; if (k) input.keys.delete(k); });
+addEventListener('blur', () => input.keys.clear());
+
+function pollInput() {
+  const K = input.keys;
+  input.b1 = ui.btn1.classList.contains('pressed') || K.has('r');
+  input.b2 = ui.btn2.classList.contains('pressed') || K.has('u');
+  let x = (K.has('r') ? 1 : 0) - (K.has('l') ? 1 : 0);
+  let z = (K.has('dn') ? 1 : 0) - (K.has('u') ? 1 : 0);
+  if (x || z) { const n = Math.hypot(x, z); x /= n; z /= n; } else { x = stickVec.x; z = stickVec.z; }
+  input.stick = { x, z };
+  ui.btn1.disabled = !['idle', 'fixed1'].includes(game.state);
+  ui.btn2.disabled = game.state !== 'fixed2';
+}
+
+// ---------------------------------------------------------------- ループ
+function resize() {
+  renderer.setSize(innerWidth, innerHeight, false);
+  camMain.aspect = innerWidth / innerHeight;
+  camMain.fov = camMain.aspect < 1.3 ? 48 : 42;   // 縦長・正方形に近い画面は少し広角に（足りない分は placeCamera で引く）
+  camMain.updateProjectionMatrix();
+  applyView();
+}
+addEventListener('resize', resize);
+
+let last = performance.now(), acc = 0, lastState = null;
+function stepSim(dt) {
+  acc += dt;
+  while (acc >= DT) { control(DT); world.step(DT); acc -= DT; }
+}
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  pollInput();
+  if (!game.paused) stepSim(dt);
+  if (game.state !== lastState) { lastState = game.state; updateUI(); }
+
+  for (const { body, obj } of synced) { obj.position.copy(body.position); obj.quaternion.copy(body.quaternion); }
+  updateChainVisual();
+  carriageMesh.position.set(carriage.position.x, CARRIAGE_Y + 0.15, carriage.position.z);
+  crossRail.position.set(carriage.position.x, CARRIAGE_Y + 0.35, (RANGE.zMin + RANGE.zMax) / 2);
+  const pos = wireGeo.attributes.position;
+  pos.setXYZ(0, carriage.position.x, CARRIAGE_Y, carriage.position.z);
+  pos.setXYZ(1, head.position.x, head.position.y + 0.4, head.position.z);
+  pos.needsUpdate = true;
+  ui.timer.textContent = settings.mode === 'free' && ['idle', 'free'].includes(game.state) ? Math.ceil(game.timer) : '';
+
+  const W = innerWidth, H = innerHeight;
+  renderer.setScissorTest(false);
+  renderer.setViewport(0, 0, W, H);
+  renderer.render(scene, camMain);
+  if (settings.pip) {
+    const pw = Math.round(Math.min(W * 0.32, 300)), ph = Math.round(pw * 0.75);
+    // スマホ縦持ちでは小窓を右下（操作ボタンの上）に置く
+    const px = W - pw - 8, py = W <= 700 ? 150 : H - ph - 10;
+    camPip.aspect = pw / ph; camPip.updateProjectionMatrix();
+    renderer.setScissorTest(true);
+    renderer.setScissor(px, py, pw, ph); renderer.setViewport(px, py, pw, ph);
+    renderer.render(scene, camPip);
+    renderer.setScissorTest(false);
+  }
+  requestAnimationFrame(frame);
+}
+
+bindSettings();
+applyView();
+resize();
+resetRound();
+renderStats();
+requestAnimationFrame(frame);
+
+// デバッグ用（ブラウザのコンソールから物理を早送りして検証できる）
+window.__ufo = { camMain, judgeCatch, input, setSlack: v => (SLACK = v), setNoise: v => (NOISE = v), game, world, head, carriage, settings, resetRound, rackTilt, placeArm, stepSim, get round() { return round; }, get ring() { return ring; } };

@@ -29,9 +29,9 @@ const TUBE = 0.055;
 
 const HEAD_HY = 0.26;
 const DEFAULT_CHAIN = 2.2;             // チェーンの既定 22cm
-// アーム（チェーンの支点）が下りる高さ（台の固定設定）: 既定のチェーンでまっすぐ垂れたリングの下端が板から 2cm 浮く高さ。
-// チェーンを伸ばせばリングは板に着いて倒れ込み・滑る
-const armStop = () => HEAD_HY + DEFAULT_CHAIN + 2 * RING_SIZES[settings.size].R + 0.2;
+// アームが下りる高さ（台の固定設定）: 既定のチェーンで、リングとチェーンをつなぐ金具（リングの付け根）が
+// 板から 2cm 浮く高さ。リング本体は板に着いて斜めに寝る。チェーンを伸ばすと付け根も板に着いてリングが平らに倒れる
+const armStop = () => HEAD_HY + DEFAULT_CHAIN + 0.2;
 const chainDrop = () => HEAD_HY + settings.chain;    // ヘッド中心からリング上端まで
 let NOISE = 0.02;
 

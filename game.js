@@ -342,11 +342,11 @@ const RACK_MASS = 3.0;   // 網台の重さ（固定。掛かれば必ず持ち�
 const MAX_TILT = 35 * Math.PI / 180;
 let round = null;   // { rack, hook, chain, prize, lay, theta }
 
-function randomLayout() {
+function randomLayout(shuffle = false) {
   if (game.forceLayout) return { ...game.forceLayout };
-  // フックの開いている側（+1: 手前 / -1: 奥）
-  const dir = settings.hookDir === 'front' ? 1 : settings.hookDir === 'back' ? -1 : (Math.random() < 0.5 ? 1 : -1);
-  if (!settings.random) return { x: 0.9, z: 0.0, dir };
+  // フックの開いている側（+1: 手前 / -1: 奥）。配置変更ボタンでは設定に関係なく位置・向きともランダム
+  const dir = !shuffle && settings.hookDir === 'front' ? 1 : !shuffle && settings.hookDir === 'back' ? -1 : (Math.random() < 0.5 ? 1 : -1);
+  if (!settings.random && !shuffle) return { x: 0.9, z: 0.0, dir };
   return { x: 0.3 + Math.random() * 1.0, z: -1.0 + Math.random() * 1.8, dir };
 }
 
@@ -667,9 +667,12 @@ const swingResponse = value => {
 };
 const effSwing = () => isHighDifficulty() ? 1 : swingResponse(isEasyDifficulty() ? Math.min(settings.swing, 0.35) : settings.swing);
 const effTwist = () => isHighDifficulty() ? 1 : isEasyDifficulty() ? 0 : settings.twist;
-function rollAngles() {
-  eff.hookYaw = isHighDifficulty() ? Math.round(Math.random() * 72) * 5 - 180 : settings.hookYaw;
-  eff.ringYaw = isHighDifficulty() ? Math.round(Math.random() * 72) * 5 - 180 : settings.ringYaw;
+// 向き: 通常は設定値（既定 90°）。難易度「大」か「配置変更」ボタンを押したラウンドはランダム
+const randomYaw = () => Math.round(Math.random() * 72) * 5 - 180;
+function rollAngles(randomAngles = false) {
+  const rnd = randomAngles || isHighDifficulty();
+  eff.hookYaw = rnd ? randomYaw() : settings.hookYaw;
+  eff.ringYaw = rnd ? randomYaw() : settings.ringYaw;
 }
 
 // ---------------------------------------------------------------- 落下予測地点（赤い印）
@@ -698,13 +701,14 @@ const input = { b1: false, b2: false, stick: { x: 0, z: 0 }, keys: new Set(), dr
 
 function setState(s) { game.state = s; game.t = 0; game.moved = false; updateUI(); }
 
-function resetRound({ keepLayout = false } = {}) {
-  rollAngles();
+function resetRound({ keepLayout = false, shuffle = false } = {}) {
+  // やり直し（keepLayout）は向きもそのまま。配置変更（shuffle）は位置・向きともランダム
+  if (!keepLayout) { rollAngles(shuffle); game.shuffled = shuffle; }
   if (round) {
     for (const b of [round.rack, round.hook, round.prize]) unlink(b);
     scene.remove(round.chain);
   }
-  const lay = keepLayout && round ? { ...round.lay } : randomLayout();
+  const lay = keepLayout && round ? { ...round.lay } : shuffle ? randomLayout(true) : randomLayout();
   lay.prizeZ ??= settings.random ? (Math.random() * 2 - 1) * 0.3 : 0;
   const rack = buildRack(lay);
   const hook = buildHook(lay);
@@ -727,7 +731,7 @@ function resetRound({ keepLayout = false } = {}) {
 
 function applyPhysicsSettings() {
   // 向きのバーは待機中ならその場で反映
-  if (round && game.state === 'idle') {
+  if (round && game.state === 'idle' && !game.shuffled) {   // 配置変更でランダムにした向きは上書きしない
     rollAngles();
     round.hook.quaternion.copy(yawQ(eff.hookYaw));
     game.restYaw = eff.ringYaw * DEG;
@@ -1080,6 +1084,8 @@ $('btnReset').addEventListener('click', e => {
   e.currentTarget.blur();
   resetRound({ keepLayout: game.state !== 'result' });
 });
+// 配置変更: フックの位置・開く向き・フックとリングの角度をランダムにして新しい配置へ（記録には数えない）
+$('btnShuffle').addEventListener('click', e => { e.currentTarget.blur(); resetRound({ shuffle: true }); });
 $('btnView').addEventListener('click', () => { viewIdx = (viewIdx + 1) % VIEWS.length; applyView(); renderStats(); });
 
 // バーチャルスティック

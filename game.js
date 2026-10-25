@@ -28,6 +28,7 @@ const RING_SIZES = { L: { R: 0.8, label: '大' }, M: { R: 0.6, label: '中' }, S
 const TUBE = 0.055;
 
 const HEAD_HY = 0.26;
+const ARM_STOP = 2.4;                  // アーム（チェーンの支点）が下りる高さ＝板から 24cm（固定）。届き方はチェーンの長さで調整
 const chainDrop = () => HEAD_HY + settings.chain;    // ヘッド中心からリング上端まで
 let NOISE = 0.02;
 
@@ -38,7 +39,7 @@ const HOOK = { stemTop: 0.62, apexY: 0.82, apexZ: 0.26, endY: 0.7, endZ: 0.46, t
 const GR = { STATIC: 1, RACK: 2, PRIZE: 4, HEAD: 8, RING: 16, HOOK: 32, SHELF: 64 };
 
 // ---------------------------------------------------------------- 設定・記録
-const DEFAULTS = { armStop: 2.4, chain: 3.0, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0, swing: 0.65, weight: 3.0, random: true, pip: true };
+const DEFAULTS = { chain: 3.0, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0, swing: 0.75, weight: 3.0, random: true, pip: true };
 const savedSettings = localStorage.getItem('ufo-hook-settings');
 const settings = Object.assign({}, DEFAULTS, JSON.parse(savedSettings || '{}'));
 // スマホの初回は重い映り込みをオフにしておく
@@ -46,11 +47,14 @@ if (!savedSettings && matchMedia('(pointer: coarse)').matches) settings.reflect 
 // 保存済み設定の移行
 //  v2: 既定のリング・フックを 90°、揺れやすさを少し上げた
 //  v4: チェーン既定 30cm（下ろしたときにリングが板の上を滑って傾く動きが大事）
-if (savedSettings && (settings.v ?? 1) < 4) {
-  if ((settings.v ?? 1) < 2) Object.assign(settings, { hookYaw: DEFAULTS.hookYaw, ringYaw: DEFAULTS.ringYaw, swing: Math.max(settings.swing, DEFAULTS.swing) });
-  settings.chain = Math.max(settings.chain, DEFAULTS.chain);
+//  v5: リングの揺れやすさの既定を「大」に
+if (savedSettings && (settings.v ?? 1) < 5) {
+  if ((settings.v ?? 1) < 2) Object.assign(settings, { hookYaw: DEFAULTS.hookYaw, ringYaw: DEFAULTS.ringYaw });
+  if ((settings.v ?? 1) < 4) settings.chain = Math.max(settings.chain, DEFAULTS.chain);
+  settings.swing = Math.max(settings.swing, DEFAULTS.swing);
 }
-settings.v = 4;
+delete settings.armStop;
+settings.v = 5;
 localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const saveSettings = () => localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const statKey = () => `ufo-hook-stats-${settings.mode}-${settings.size}`;
@@ -633,9 +637,9 @@ function resetRound() {
   round = { rack: rack.body, attachLocal: rack.attachLocal, hook, chain: makeChainMesh(16, M.gold), prize, lay, theta: 0 };
 
   buildRing();
-  // 下降停止位置（台ごとの固定設定）: アーム（チェーンの支点）が板から armStop の高さまで下りる。
+  // 下降停止位置（台ごとの固定設定）: アーム（チェーンの支点）が板から ARM_STOP の高さまで下りる。
   // チェーンの長さに関係なく支点は同じ所まで下りるので、長いチェーンほどリングは板の上で大きく倒れて滑る
-  const headY = SHELF.topY + settings.armStop;
+  const headY = SHELF.topY + ARM_STOP;
   game.Ltarget = CARRIAGE_Y - headY;
   game.L = L_HOME;
   placeArm(HOME.x, HOME.z, L_HOME);
@@ -957,10 +961,6 @@ function bindSettings() {
     el.onchange = () => el.blur();
   };
   slider('swing', 'swing', v => ['ほぼ無し', '小', '中', '大', '最大'][Math.round(v * 4)]);
-  const as = $('armStop'), asOut = $('armStopVal');
-  as.value = settings.armStop; asOut.textContent = `${Math.round(settings.armStop * 10)} cm`;
-  as.oninput = () => { settings.armStop = parseFloat(as.value); asOut.textContent = `${Math.round(settings.armStop * 10)} cm`; saveSettings(); };
-  as.onchange = () => { as.blur(); if (game.state === 'idle') game.Ltarget = CARRIAGE_Y - (SHELF.topY + settings.armStop); };
   const ch = $('chain'), chOut = $('chainVal');
   ch.value = settings.chain; chOut.textContent = `${Math.round(settings.chain * 10)} cm`;
   ch.oninput = () => { settings.chain = parseFloat(ch.value); chOut.textContent = `${Math.round(settings.chain * 10)} cm`; saveSettings(); };

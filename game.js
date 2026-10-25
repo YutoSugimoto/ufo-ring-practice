@@ -38,16 +38,21 @@ const armStop = () => HEAD_HY + DEFAULT_CHAIN + 0.2;
 const chainMin = size => Math.ceil((armStop() - HEAD_HY - 2 * RING_SIZES[size].R) * 20) / 20;
 const CHAIN_MAX = 4.0;
 const chainDrop = () => HEAD_HY + settings.chain;    // ヘッド中心からリング上端まで
-let NOISE = 0.02;
+let NOISE = 0.006;
 
 const RACK = { len: 3.8, halfZ: 1.4, thick: 0.1, topY: 2.1 };   // 網台。ヒンジは x = CHUTE_X
 const SHELF = { xMin: -1.2, xMax: 3.95, zMin: -2.95, zMax: 2.95, topY: 3.95, thick: 0.1 };
 const HOOK = { stemTop: 0.62, apexY: 0.82, apexZ: 0.26, endY: 0.7, endZ: 0.46, tipY: 0.3, w: 0.045 };
 
 const GR = { STATIC: 1, RACK: 2, PRIZE: 4, HEAD: 8, RING: 16, HOOK: 32, SHELF: 64 };
+// 床（アクリル板）とリングの摩擦。cannon-es の摩擦は「μ×重力×質量」を接触点ごとの上限にする近似で、
+// 実際の垂直抗力を使わない（リングは小球の集まりなので寝ると接触点の数だけ摩擦が増えて全く動かなくなる）。
+// そのためエンジンの摩擦は 0 にして、接触の垂直抗力から静止摩擦・動摩擦を自前で計算する（applyRingFloorFriction）
+const FLOOR_MU = { defaultKinetic: 0.12, staticRatio: 1.35, staticExtra: 0.02, stickSpeed: 0.04 };
+const floorMuS = () => settings.floorMuK * FLOOR_MU.staticRatio + FLOOR_MU.staticExtra;
 
 // ---------------------------------------------------------------- 設定・記録
-const DEFAULTS = { speed: 0.5, difficulty: 'normal', marker: true, floorMu: 0.01, chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.85, random: true, pip: true };
+const DEFAULTS = { speed: 0.5, difficulty: 'normal', marker: true, floorMuK: FLOOR_MU.defaultKinetic, chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0.5, swing: 0.65, random: true, pip: true };
 const savedSettings = localStorage.getItem('ufo-hook-settings');
 const storedSettings = JSON.parse(savedSettings || '{}') || {};
 const settings = Object.assign({}, DEFAULTS, storedSettings);
@@ -71,11 +76,12 @@ if (savedSettings && (settings.v ?? 1) < 5) {
 delete settings.armStop;
 if ((settings.v ?? 1) < 7) settings.chain = DEFAULT_CHAIN;
 if ((settings.v ?? 1) < 8 && !settings.twist) settings.twist = DEFAULTS.twist;   // v8: 揺れでリングが回るを既定でオン   // v7: チェーン既定 22cm・下降位置はリングが 2cm 浮く高さ
-if (savedSettings && (settings.v ?? 1) < 10 && settings.floorMu === 0.03) settings.floorMu = DEFAULTS.floorMu; // v10: 旧既定の床摩擦を更新
-if (savedSettings && (settings.v ?? 1) < 12 && settings.swing === 0.75) settings.swing = DEFAULTS.swing; // v12: 旧既定の揺れを少し大きく
+if (savedSettings && (storedSettings.v ?? 1) < 12 && storedSettings.swing === 0.75) settings.swing = DEFAULTS.swing;
+if (savedSettings && (storedSettings.v ?? 1) < 17) settings.floorMuK = DEFAULTS.floorMuK;   // v17: 摩擦を垂直抗力ベースに作り直し
+delete settings.floorMu;
 delete settings.weight;
 delete settings.hard;
-settings.v = 13;
+settings.v = 17;
 localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const saveSettings = () => localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const statKey = () => {
@@ -109,7 +115,7 @@ cm(mat.prize, mat.stat, 0.45);
 world.addContactMaterial(new CANNON.ContactMaterial(mat.ring, mat.hook, { friction: 0, restitution: 0 }));
 // アクリル板とリングの摩擦（設定「床の滑りやすさ」で切り替え）。既定はよく滑る:
 // 着地後、リングの付け根（チェーンの支点）は落ちた位置から動かず、板に着いた先端側が滑って倒れる
-const ringShelfCM = new CANNON.ContactMaterial(mat.ring, mat.shelf, { friction: 0.03, restitution: 0 });
+const ringShelfCM = new CANNON.ContactMaterial(mat.ring, mat.shelf, { friction: 0, restitution: 0 });   // 摩擦は自前（上のコメント参照）
 world.addContactMaterial(ringShelfCM);
 cm(mat.hook, mat.shelf, 0.5, 0);
 
@@ -655,7 +661,11 @@ const crossRail = box(0.14, 0.12, RANGE.zMax - RANGE.zMin + 0.8, M.metal); scene
 const eff = { hookYaw: 0, ringYaw: 0 };
 const isHighDifficulty = () => settings.difficulty === 'high';
 const isEasyDifficulty = () => settings.difficulty === 'easy';
-const effSwing = () => isHighDifficulty() ? 1 : isEasyDifficulty() ? Math.min(settings.swing, 0.35) : settings.swing;
+const swingResponse = value => {
+  const v = Math.max(0, Math.min(1, value));
+  return 1 - (1 - v) ** 2;
+};
+const effSwing = () => isHighDifficulty() ? 1 : swingResponse(isEasyDifficulty() ? Math.min(settings.swing, 0.35) : settings.swing);
 const effTwist = () => isHighDifficulty() ? 1 : isEasyDifficulty() ? 0 : settings.twist;
 function rollAngles() {
   eff.hookYaw = isHighDifficulty() ? Math.round(Math.random() * 72) * 5 - 180 : settings.hookYaw;
@@ -716,7 +726,6 @@ function resetRound({ keepLayout = false } = {}) {
 }
 
 function applyPhysicsSettings() {
-  ringShelfCM.friction = settings.floorMu;
   // 向きのバーは待機中ならその場で反映
   if (round && game.state === 'idle') {
     rollAngles();
@@ -724,9 +733,19 @@ function applyPhysicsSettings() {
     game.restYaw = eff.ringYaw * DEG;
     placeArm(carriage.position.x, carriage.position.z, game.L);
   }
-  // 「リングの揺れやすさ」= 空気抵抗・チェーンの摩擦の少なさ
-  // 揺れが長く続くように空気抵抗は小さめ
-  if (ring) { ring.angularDamping = 0.3 - 0.29 * effSwing(); ring.linearDamping = 0.25 - 0.245 * effSwing(); }
+  applyRingDamping();
+}
+
+function applyRingDamping() {
+  if (!ring) return;
+  const swing = effSwing();
+  const liftDamping = ['lift', 'hold'].includes(game.state);
+  // 下降中は設定に応じて揺らす。引き上げ中は、板の上で傾いていたリングが付け根の真下へ戻るときの
+  // 振り子運動を、チェーンのコマ同士の摩擦で吸収するイメージで強めに減衰させる（動画のように静かに上がる）
+  const early = liftDamping && game.state === 'lift' && game.t < 1.2;
+  ring.angularDamping = liftDamping ? (early ? 0.9 : 0.6) : 0.3 - 0.29 * swing;
+  ring.linearDamping = liftDamping ? (early ? 0.6 : 0.35) : 0.25 - 0.245 * swing;
+  shackle.linearDamping = liftDamping ? 0.4 : 0.08 - 0.078 * swing;
 }
 
 const rackTilt = () => round ? 2 * Math.atan2(round.rack.quaternion.z, round.rack.quaternion.w) * 180 / Math.PI : 0;
@@ -739,6 +758,43 @@ function ringLowest() {
   down.normalize();
   return { p: ring.position.vadd(down.scale(ringR)), n };
 }
+// ---------------------------------------------------------------- 床の摩擦（自前のクーロン摩擦）
+// 前のステップで解いた接触の力（multiplier = 垂直抗力）を使い、リングの接触点の滑り速度に逆らう力をかける。
+// 速度が小さければ静止摩擦で止め（最大 μs·N）、滑っていれば動摩擦 μk·N。合力を接触点の重心にかけるので
+// 先端側だけが滑る・倒れ込むといった回転も自然に出る
+function applyRingFloorFriction(dt) {
+  if (!ring) return;
+  let N = 0;
+  const pc = V(0, 0, 0);
+  for (const c of world.contacts) {
+    let r;
+    if (c.bi === ring && c.bj.material === mat.shelf) r = c.ri;
+    else if (c.bj === ring && c.bi.material === mat.shelf) r = c.rj;
+    else continue;
+    const f = Math.abs(c.multiplier);
+    if (!(f > 0)) continue;
+    N += f;
+    pc.x += r.x * f; pc.y += r.y * f; pc.z += r.z * f;
+  }
+  if (N <= 1e-6) return;
+  pc.scale(1 / N, pc);   // リング中心からの接触点（力の重み付き平均）
+  // 接触点の速度（水平成分＝板に沿った滑り）
+  const vp = ring.velocity.vadd(ring.angularVelocity.cross(pc));
+  const vt = V(vp.x, 0, vp.z), sp = vt.length();
+  if (sp < 1e-6) return;
+  const muK = settings.floorMuK, muS = floorMuS();
+  // 接触点での実効質量（回転しやすさを含む）。これを超える力をかけると逆向きに弾いてしまう
+  const t = V(vt.x / sp, 0, vt.z / sp);
+  const rxt = pc.cross(t);
+  const k = ring.invMass + rxt.dot(ring.invInertiaWorld.vmult(rxt));
+  const stopF = sp / dt / k;   // このステップで滑りをちょうど止める力
+  // 静止摩擦: 遅ければ止め切る（上限 μs·N）。滑っていれば動摩擦 μk·N（止め切る力を超えない）
+  const F = sp < FLOOR_MU.stickSpeed ? Math.min(stopF, muS * N) : Math.min(stopF, muK * N);
+  if (F <= 0) return;
+  const fx = -vt.x / sp * F, fz = -vt.z / sp * F;
+  ring.applyForce(V(fx, 0, fz), pc);   // cannon-es の applyForce は重心からの相対位置
+}
+
 // ---------------------------------------------------------------- 制御（物理 1 ステップごと）
 function control(dt) {
   game.t += dt;
@@ -780,7 +836,8 @@ function control(dt) {
       }
       break;
     case 'lift':
-      game.L = Math.max(L_HOME, game.L - LIFT_SPEED * dt);
+      // 引き上げはゆっくり動き出す（チェーンが一気に張ってリングが跳ねないように）
+      game.L = Math.max(L_HOME, game.L - LIFT_SPEED * Math.min(1, 0.25 + game.t / 0.5) * dt);
       // 網台が上限まで上がったらそこで上昇停止（チェーンが張ってアームが止まる）
       if (game.L <= L_HOME || round.theta >= MAX_TILT - 1e-3) setState('hold');
       break;
@@ -802,6 +859,9 @@ function control(dt) {
       break;
   }
 
+  applyRingDamping();
+  applyRingFloorFriction(dt);
+
   // キャリッジ（ガントリー）の移動。急停止すると吊られたアームとリングが振り子のように揺れる
   for (const k of ['x', 'z']) {
     const targetSpeed = isHighDifficulty() ? 1 : isEasyDifficulty() ? 0 : settings.speed;
@@ -821,7 +881,10 @@ function control(dt) {
   head.position.x = cx; head.position.z = cz;
   updateRack(dt);
   // 下ろしてチェーンがたるんだら、リングの付け根はアームの真下（落ちた位置）に留まる
-  if (['descend', 'bottom'].includes(game.state) && head.position.distanceTo(shackle.position) < rope.distance - 0.03) {
+  // 引き上げの初め（リングが板から離れて少しの間）も、ゆっくり巻き上げるチェーンは真下に垂れたまま。
+  // 付け根が振り子のように振られないよう、アームの真下へ寄せ続ける
+  const liftPin = game.state === 'lift' && (game.t < 0.8 || ringLowest().p.y - SHELF.topY < 0.6);
+  if ((['descend', 'bottom'].includes(game.state) && head.position.distanceTo(shackle.position) < rope.distance - 0.03) || liftPin) {
     // 位置を直接動かすとフックをすり抜けるので、速度で落ちた位置へ寄せる（フックに当たればそこで止まる）
     const k = 8;
     shackle.velocity.x = (head.position.x - shackle.position.x) * k;
@@ -830,8 +893,9 @@ function control(dt) {
 
   // 実機の微振動。チェーンがたるんで縁で立ったリングは、わずかな揺れでどちらかへ倒れる
   if (ring) {
-    ring.angularVelocity.x += (Math.random() - 0.5) * NOISE;
-    ring.angularVelocity.z += (Math.random() - 0.5) * NOISE;
+    const vibration = NOISE * effSwing();
+    ring.angularVelocity.x += (Math.random() - 0.5) * vibration;
+    ring.angularVelocity.z += (Math.random() - 0.5) * vibration;
     // 移動中の揺れでチェーンがねじれ、リングの向きが少しずつ回ってしまう（オプション）
     const sp = Math.hypot(game.vel.x, game.vel.z);
     if (effTwist() > 0) {
@@ -941,7 +1005,7 @@ function bindSettings() {
   };
   slider('speed', 'speed', v => ['小（遅い）', '中', '大（速い）'][v * 2]);
   slider('swing', 'swing', v => ['ほぼ無し', '小', '中', '大', '最大'][Math.round(v * 4)]);
-  slider('floorMu', 'floorMu', v => `μ=${v.toFixed(2)}${v <= 0.05 ? '（よく滑る）' : v >= 0.4 ? '（滑らない）' : ''}`);
+  slider('floorMuK', 'floorMuK', v => `μ=${v.toFixed(2)}${v <= 0.05 ? '（よく滑る）' : v >= 0.4 ? '（滑らない）' : ''}`);
   const ch = $('chain'), chOut = $('chainVal');
   updateChainRange();
   ch.oninput = () => { settings.chain = parseFloat(ch.value); chOut.textContent = `${Math.round(settings.chain * 10)} cm`; saveSettings(); };

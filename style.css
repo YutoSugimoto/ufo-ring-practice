@@ -90,7 +90,7 @@ button.round.sub.level { background: #7fc8ff; line-height: 1.15; }
 button.round.sub.level b { font-size: 15px; }
 button.round.sub.level.hard { background: #ff5a5a; }
 #btnMode { position: fixed; left: 10px; bottom: calc(150px + env(safe-area-inset-bottom)); z-index: 5; background: #9b8cff; font-size: 11px; line-height: 1.2; }
-button.round.sub.reset { background: #ff7eb6; font-size: 12px; }
+button.round.sub.reset { background: #ff7eb6; font-size: 10px; padding: 0; white-space: nowrap; }
 .hidden { display: none !important; }
 
 #help { right: 10px; bottom: 200px; font-size: 12px; line-height: 1.6; max-width: 240px; opacity: 0.85; }

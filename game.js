@@ -581,8 +581,10 @@ world.addBody(head);
 // チェーン: ヘッド → シャックル（リングの吊り金具）を「張ったときだけ効く」ロープで結ぶ。
 // ゆるむとリングはアクリル板やフックの上で自由に倒れる。
 const shackle = new CANNON.Body({ mass: 0.1, linearDamping: 0.02 });
-shackle.addShape(new CANNON.Sphere(0.03));
-shackle.collisionFilterGroup = 0; shackle.collisionFilterMask = 0;
+shackle.addShape(new CANNON.Sphere(0.06));
+// 付け根の金具もフックと板には当たる（フックを突き抜けないように）
+shackle.collisionFilterGroup = GR.RING; shackle.collisionFilterMask = GR.HOOK | GR.SHELF;
+shackle.material = mat.ring;
 shackle.updateMassProperties();
 world.addBody(shackle);
 const rope = new CANNON.DistanceConstraint(head, shackle, chainDrop());
@@ -593,6 +595,7 @@ const armChain = makeChainMesh(24, M.metal, 0.055);
 let ring = null, ringR = 0, ringJoint = null;
 
 function buildRing() {
+  shackle.collisionFilterMask = GR.HOOK | GR.SHELF;
   if (ring) { world.removeConstraint(ringJoint); unlink(ring); }
   const R = RING_SIZES[settings.size].R;
   ringR = R;
@@ -778,6 +781,7 @@ function attachRing(c) {
   c.joint = new CANNON.PointToPointConstraint(ring, pr, hook, hp);
   world.addConstraint(c.joint);
   ring.collisionFilterMask &= ~GR.HOOK;
+  shackle.collisionFilterMask = GR.SHELF;
 }
 function detachRing() {
   if (!game.catch?.joint) return;
@@ -896,8 +900,10 @@ function control(dt) {
   }
   // 下ろしてチェーンがたるんだら、リングの付け根はアームの真下（落ちた位置）に留まる
   if (['descend', 'bottom'].includes(game.state) && head.position.distanceTo(shackle.position) < rope.distance - 0.03) {
-    shackle.position.x = head.position.x; shackle.position.z = head.position.z;
-    shackle.velocity.x = 0; shackle.velocity.z = 0;
+    // 位置を直接動かすとフックをすり抜けるので、速度で落ちた位置へ寄せる（フックに当たればそこで止まる）
+    const k = 8;
+    shackle.velocity.x = (head.position.x - shackle.position.x) * k;
+    shackle.velocity.z = (head.position.z - shackle.position.z) * k;
   }
 
   // 実機の微振動。チェーンがたるんで縁で立ったリングは、わずかな揺れでどちらかへ倒れる

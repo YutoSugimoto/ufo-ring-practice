@@ -12,11 +12,11 @@ import { Reflector } from 'three/addons/objects/Reflector.js';
 // ---------------------------------------------------------------- 定数
 const G = 98;
 const DT = 1 / 180;
-const CAB = { xMin: -4, xMax: 4, zMin: -3, zMax: 3, h: 13.4 };
+const CAB = { xMin: -4, xMax: 4, zMin: -3, zMax: 3, h: 15.2 };
 const CHUTE_X = -2.1;                 // x < CHUTE_X が取り出し口
 const HOME = { x: -3.0, z: 2.2 };     // アームの初期位置（左手前・取り出し口の上）
 const RANGE = { xMin: -3.2, xMax: 3.3, zMin: -2.5, zMax: 2.3 };
-const CARRIAGE_Y = 12.6;
+const CARRIAGE_Y = 14.4;
 const L_HOME = 0.7;
 const MOVE_SPEED = 1.6;               // 16cm/s
 const ACCEL = 30;                     // 実機のガントリーはほぼ急発進・急停止（アーム本体は揺れず、リングだけが振れる）
@@ -30,7 +30,6 @@ const TUBE = 0.055;
 const HEAD_HY = 0.26;
 const chainDrop = () => HEAD_HY + settings.chain;    // ヘッド中心からリング上端まで
 let NOISE = 0.02;
-let SLACK = 0.12;                   // 下降停止時、リング下端が板より何cm下まで行くか（＝チェーンのたるみ）
 
 const RACK = { len: 3.8, halfZ: 1.4, thick: 0.1, topY: 2.1 };   // 網台。ヒンジは x = CHUTE_X
 const SHELF = { xMin: -1.2, xMax: 3.95, zMin: -2.95, zMax: 2.95, topY: 3.95, thick: 0.1 };
@@ -39,17 +38,20 @@ const HOOK = { stemTop: 0.62, apexY: 0.82, apexZ: 0.26, endY: 0.7, endZ: 0.46, t
 const GR = { STATIC: 1, RACK: 2, PRIZE: 4, HEAD: 8, RING: 16, HOOK: 32, SHELF: 64 };
 
 // ---------------------------------------------------------------- 設定・記録
-const DEFAULTS = { chain: 2.2, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0, swing: 0.65, weight: 3.0, random: true, pip: true };
-const settings = Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem('ufo-hook-settings') || '{}'));
-// 保存済み設定の移行（v2: 既定のリング・フックを 90°、揺れやすさを少し上げた / v3: チェーンを長く）
-if ((settings.v ?? 1) < 3) {
-  // v3: チェーンを長く（リングが板に着いてからの滑り込み・傾きが大事なので）
-  Object.assign(settings, (settings.v ?? 1) < 2 ? { hookYaw: DEFAULTS.hookYaw, ringYaw: DEFAULTS.ringYaw, swing: Math.max(settings.swing, DEFAULTS.swing) } : {});
-  Object.assign(settings, { chain: Math.max(settings.chain, DEFAULTS.chain), v: 3 });
-  localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
-}
+const DEFAULTS = { armStop: 2.4, chain: 3.0, reflect: true, grid: true, mode: 'fixed', size: 'M', hookDir: 'random', hookYaw: 90, ringYaw: 90, twist: 0, swing: 0.65, weight: 3.0, random: true, pip: true };
+const savedSettings = localStorage.getItem('ufo-hook-settings');
+const settings = Object.assign({}, DEFAULTS, JSON.parse(savedSettings || '{}'));
 // スマホの初回は重い映り込みをオフにしておく
-if (!localStorage.getItem('ufo-hook-settings') && matchMedia('(pointer: coarse)').matches) settings.reflect = false;
+if (!savedSettings && matchMedia('(pointer: coarse)').matches) settings.reflect = false;
+// 保存済み設定の移行
+//  v2: 既定のリング・フックを 90°、揺れやすさを少し上げた
+//  v4: チェーン既定 30cm（下ろしたときにリングが板の上を滑って傾く動きが大事）
+if (savedSettings && (settings.v ?? 1) < 4) {
+  if ((settings.v ?? 1) < 2) Object.assign(settings, { hookYaw: DEFAULTS.hookYaw, ringYaw: DEFAULTS.ringYaw, swing: Math.max(settings.swing, DEFAULTS.swing) });
+  settings.chain = Math.max(settings.chain, DEFAULTS.chain);
+}
+settings.v = 4;
+localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const saveSettings = () => localStorage.setItem('ufo-hook-settings', JSON.stringify(settings));
 const statKey = () => `ufo-hook-stats-${settings.mode}-${settings.size}`;
 const loadStats = () => Object.assign({ tries: 0, wins: 0, streak: 0, best: 0 }, JSON.parse(localStorage.getItem(statKey()) || '{}'));
@@ -75,8 +77,8 @@ const cm = (a, b, friction, restitution = 0.05) =>
   world.addContactMaterial(new CANNON.ContactMaterial(a, b, { friction, restitution }));
 cm(mat.prize, mat.rack, 0.12);
 cm(mat.prize, mat.stat, 0.45);
-cm(mat.ring, mat.hook, 0.35, 0);
-cm(mat.ring, mat.shelf, 0.2, 0);     // アクリル板はよく滑る
+cm(mat.ring, mat.hook, 0.2, 0);
+cm(mat.ring, mat.shelf, 0.05, 0);    // アクリル板はよく滑る（着地後、リングの下側は板の上を滑り、チェーンの支点は固定のまま傾く）
 cm(mat.hook, mat.shelf, 0.5, 0);
 
 const V = (x, y, z) => new CANNON.Vec3(x, y, z);
@@ -108,10 +110,10 @@ scene.fog = new THREE.Fog(0xf3f1f6, 30, 55);
 const camMain = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
 const camPip = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
 const VIEWS = [
-  { name: '正面', pos: [0, 13.2, 22], look: [0, 6.0, 0] },   // 立った目線でやや上から
-  { name: '右横', pos: [20, 8.2, 0.3], look: [0, 5.6, 0] },
-  { name: '斜め', pos: [12.5, 12.8, 13.5], look: [0, 5.2, 0] },
-  { name: '真上', pos: [0, 22, 0.01], look: [0, 0, 0], noRoof: true },
+  { name: '正面', pos: [0, 14.6, 24], look: [0, 6.6, 0] },   // 立った目線でやや上から
+  { name: '右横', pos: [22, 9, 0.3], look: [0, 6.2, 0] },
+  { name: '斜め', pos: [13.5, 14, 14.5], look: [0, 5.8, 0] },
+  { name: '真上', pos: [0, 24, 0.01], look: [0, 0, 0], noRoof: true },
 ];
 let viewIdx = 0;
 const ROOF_LAYER = 1;
@@ -631,8 +633,9 @@ function resetRound() {
   round = { rack: rack.body, attachLocal: rack.attachLocal, hook, chain: makeChainMesh(16, M.gold), prize, lay, theta: 0 };
 
   buildRing();
-  // 下降停止位置（台ごとの固定設定）: リングが真下に垂れていれば、下端が板の SLACK 下に来る深さ
-  const headY = SHELF.topY - SLACK + 2 * ringR + chainDrop();
+  // 下降停止位置（台ごとの固定設定）: アーム（チェーンの支点）が板から armStop の高さまで下りる。
+  // チェーンの長さに関係なく支点は同じ所まで下りるので、長いチェーンほどリングは板の上で大きく倒れて滑る
+  const headY = SHELF.topY + settings.armStop;
   game.Ltarget = CARRIAGE_Y - headY;
   game.L = L_HOME;
   placeArm(HOME.x, HOME.z, L_HOME);
@@ -719,7 +722,7 @@ function judgeCatch() {
 // フック（柱→アーチ→先端）のどこかがリング面を「穴の内側」で貫いているか
 function threadTest(n) {
   const { hook, lay } = round, d = lay.dir, H = HOOK;
-  const pts = [V(0, 0.1, 0), V(0, H.stemTop, 0), V(0, H.apexY, d * H.apexZ), V(0, H.endY, d * H.endZ), V(0, H.tipY, d * H.endZ)]
+  const pts = [V(0, -0.1, 0), V(0, H.stemTop, 0), V(0, H.apexY, d * H.apexZ), V(0, H.endY, d * H.endZ), V(0, H.tipY, d * H.endZ)]
     .map(p => hook.pointToWorldFrame(p));
   const c = ring.position, inner = ringR - TUBE - HOOK.w - 0.02;
   for (let i = 0; i < pts.length - 1; i++) {
@@ -736,10 +739,14 @@ function threadTest(n) {
 // 掛かったリングをフックのアーチ内側へ滑り込ませてつなぐ
 function attachRing(c) {
   const { hook, lay } = round;
-  const pr = V(0, -ringR + TUBE, 0);
-  const wp = ring.pointToWorldFrame(pr);
-  const hp = hook.pointToLocalFrame(wp);
   c.target = V(0, HOOK.apexY - HOOK.w - TUBE, lay.dir * (HOOK.apexZ + HOOK.endZ) / 2);
+  // リングの輪のうち、フックのアーチに一番近い点を掛かる点にする（倒れたリングでも自然に）
+  const q = ring.pointToLocalFrame(hook.pointToWorldFrame(c.target));
+  q.z = 0;
+  if (q.length() < 1e-3) q.set(0, -1, 0);
+  q.normalize();
+  const pr = q.scale(ringR - TUBE);
+  const hp = hook.pointToLocalFrame(ring.pointToWorldFrame(pr));
   c.joint = new CANNON.PointToPointConstraint(ring, pr, hook, hp);
   world.addConstraint(c.joint);
   ring.collisionFilterMask &= ~GR.HOOK;
@@ -801,6 +808,11 @@ function control(dt) {
       break;
     case 'lift':
       game.L = Math.max(L_HOME, game.L - LIFT_SPEED * dt);
+      // 引き上げで板の上を引きずられたリングが、フックの穴に滑り込んだら掛かる
+      if (!game.catch && game.t < 2.0 && ringLowest().p.y - SHELF.topY < HOOK.apexY) {
+        const th = threadTest(ringLowest().n);
+        if (th) { game.catch = { deep: th.deep, slipTilt: 14 + Math.random() * 24, late: true }; attachRing(game.catch); }
+      }
       // 浅い掛かりは途中で外れる
       if (game.catch && !game.catch.deep && rackTilt() >= game.catch.slipTilt) detachRing();
       // 網台が上限まで上がったらそこで上昇停止（チェーンが張ってアームが止まる）
@@ -945,6 +957,10 @@ function bindSettings() {
     el.onchange = () => el.blur();
   };
   slider('swing', 'swing', v => ['ほぼ無し', '小', '中', '大', '最大'][Math.round(v * 4)]);
+  const as = $('armStop'), asOut = $('armStopVal');
+  as.value = settings.armStop; asOut.textContent = `${Math.round(settings.armStop * 10)} cm`;
+  as.oninput = () => { settings.armStop = parseFloat(as.value); asOut.textContent = `${Math.round(settings.armStop * 10)} cm`; saveSettings(); };
+  as.onchange = () => { as.blur(); if (game.state === 'idle') game.Ltarget = CARRIAGE_Y - (SHELF.topY + settings.armStop); };
   const ch = $('chain'), chOut = $('chainVal');
   ch.value = settings.chain; chOut.textContent = `${Math.round(settings.chain * 10)} cm`;
   ch.oninput = () => { settings.chain = parseFloat(ch.value); chOut.textContent = `${Math.round(settings.chain * 10)} cm`; saveSettings(); };
@@ -1086,4 +1102,4 @@ renderStats();
 requestAnimationFrame(frame);
 
 // デバッグ用（ブラウザのコンソールから物理を早送りして検証できる）
-window.__ufo = { camMain, judgeCatch, input, setSlack: v => (SLACK = v), setNoise: v => (NOISE = v), game, world, head, carriage, settings, resetRound, rackTilt, placeArm, stepSim, get round() { return round; }, get ring() { return ring; } };
+window.__ufo = { camMain, judgeCatch, input, setNoise: v => (NOISE = v), game, world, head, carriage, settings, resetRound, rackTilt, placeArm, stepSim, get round() { return round; }, get ring() { return ring; } };

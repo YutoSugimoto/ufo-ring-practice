@@ -11,7 +11,7 @@ import { Reflector } from 'three/addons/objects/Reflector.js';
 
 // ---------------------------------------------------------------- 定数
 const G = 98;
-const DT = 1 / 180;
+const DT = 1 / 120;   // 物理の刻み（ヒントの先読み計算も同じ刻みで回すので、軽くするため 120Hz）
 const CAB = { xMin: -4, xMax: 4, zMin: -3, zMax: 3, h: 15.2 };
 const CHUTE_X = -2.1;                 // x < CHUTE_X が取り出し口
 const HOME = { x: -3.0, z: 2.2 };     // アームの初期位置（左手前・取り出し口の上）
@@ -20,7 +20,7 @@ const CARRIAGE_Y = 14.4;
 const L_HOME = 0.7;
 const SPEEDS = { 0: 1.1, 0.5: 1.6, 1: 2.4 };   // クレーンの移動速度 小 11cm/s・中 16cm/s・大 24cm/s（速いほど止めた時によく揺れる）
 const ACCEL = 60;                     // 実機のガントリーはほぼ急発進・急停止（アーム本体は揺れず、リングだけが振れる）
-const DESCEND_SPEED = 1.4;
+const DESCEND_SPEED = 3.4;          // 下降は速め（実機もストンと下りる。ヒント計算も速くなる）
 const LIFT_SPEED = 1.0;
 const BOTTOM_HOLD = 1.2;             // 下降停止後、引き上げまでの待ち時間
 const FREE_TIME = 15;
@@ -96,7 +96,7 @@ const saveStats = s => localStorage.setItem(statKey(), JSON.stringify(s));
 
 // ---------------------------------------------------------------- 物理ワールド
 const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -G, 0) });
-world.solver.iterations = 40;
+world.solver.iterations = 30;
 world.solver.tolerance = 1e-4;
 world.allowSleep = false;
 
@@ -1221,32 +1221,31 @@ function restoreWorld(sn) {
 const hint = { job: null, group: new THREE.Group() };
 scene.add(hint.group);
 const hintMat = {
-  ok: new THREE.MeshBasicMaterial({ color: 0x18c964, transparent: true, opacity: 0.9, depthWrite: false }),
-  ng: new THREE.MeshBasicMaterial({ color: 0x7a808c, transparent: true, opacity: 0.55, depthWrite: false }),
-  wait: new THREE.MeshBasicMaterial({ color: 0x6fb7ff, transparent: true, opacity: 0.45, depthWrite: false }),
+  ok: new THREE.MeshBasicMaterial({ color: 0x18c964, transparent: true, opacity: 0.95, depthWrite: false }),
 };
-const hintGeo = new THREE.PlaneGeometry(0.09, 0.22);   // 移動方向に細長いマス（並ぶと線に見える）
+const hintDotGeo = new THREE.CircleGeometry(0.07, 24);   // 取れる停止位置の緑の丸
 function clearHint() { hint.job = null; hint.group.clear(); }
+// 候補は「粗く（2cm刻み）→ 間を埋める（1cm）」の 2 段階。取れる位置にだけ緑の丸を置く
 function startHint(kind) {
   clearHint();
   if (!settings.hint || settings.mode !== 'fixed' || !round) return;
   const { lay } = round;
-  const cands = [];
+  const all = [];
   if (kind === 'x') {
-    for (let x = Math.max(RANGE.xMin + 0.1, lay.x - 0.9); x <= Math.min(RANGE.xMax, lay.x + 0.9) + 1e-6; x += 0.1) cands.push(x);
+    for (let x = Math.max(RANGE.xMin + 0.1, lay.x - 0.8); x <= Math.min(RANGE.xMax, lay.x + 0.8) + 1e-6; x += 0.1) all.push(+x.toFixed(3));
   } else {
     const z0 = carriage.position.z;
-    for (let z = Math.min(z0 - 0.1, lay.z + 0.9); z >= Math.max(RANGE.zMin, lay.z - 0.9) - 1e-6; z -= 0.1) cands.push(z);
+    for (let z = Math.min(z0 - 0.1, lay.z + 0.8); z >= Math.max(RANGE.zMin, lay.z - 0.8) - 1e-6; z -= 0.1) all.push(+z.toFixed(3));
   }
-  const markers = cands.map(c => {
-    const m = new THREE.Mesh(hintGeo, hintMat.wait);
-    m.rotation.x = -Math.PI / 2; m.renderOrder = 6;
-    if (kind === 'x') m.rotation.z = 0; else m.rotation.z = Math.PI / 2;
-    if (kind === 'x') m.position.set(c, SHELF.topY + 0.015, lay.z); else m.position.set(carriage.position.x, SHELF.topY + 0.015, c);
-    hint.group.add(m);
-    return m;
-  });
-  hint.job = { kind, cands, markers, idx: 0, base: snapshotWorld(), trial: null, prefix: null };
+  const coarse = all.filter((_, i) => i % 2 === 0), fine = all.filter((_, i) => i % 2 === 1);
+  hint.job = { kind, passes: [coarse, fine], pass: 0, cands: coarse, idx: 0, done: 0, total: all.length,
+    base: snapshotWorld(), trial: null, prefix: null, ok: [], hookZ: lay.z, carX: carriage.position.x };
+}
+function addHintDot(job, c) {
+  const m = new THREE.Mesh(hintDotGeo, hintMat.ok);
+  m.rotation.x = -Math.PI / 2; m.renderOrder = 6;
+  if (job.kind === 'x') m.position.set(c, SHELF.topY + 0.015, job.hookZ); else m.position.set(job.carX, SHELF.topY + 0.015, c);
+  hint.group.add(m);
 }
 // 1 試行を少しずつ進める。終わったら true/false を返す（途中なら undefined）
 // 候補は移動方向の順に並んでいるので、「ボタンを押し続けて次の候補位置に着いた瞬間」の状態を job.prefix に
@@ -1266,16 +1265,16 @@ function stepHintTrial(tr, maxSteps) {
     }
     control(DT); world.step(DT); tr.steps++;
     if (tr.steps > 90 && game.state === 'idle') return false;   // 動き出せない（既に通り過ぎた位置など）
-    if (round.theta > 4 * DEG) return true;                                           // 網台が持ち上がった＝取れる
+    if (round.theta > 2.5 * DEG) return true;                                         // 網台が持ち上がり始めた＝取れる
     // リングがフックより十分上まで上がってもフックが動かなければ外れ
-    if (game.state === 'lift' && (game.t > 3.5 || ringLowest().p.y - SHELF.topY > HOOK.apexY + 0.5)) return false;
-    if (['hold', 'return', 'result'].includes(game.state) || tr.steps > 180 * 14) return false;
+    if (game.state === 'lift' && (game.t > 3.0 || ringLowest().p.y - SHELF.topY > HOOK.apexY + 0.25)) return false;
+    if (['hold', 'return', 'result'].includes(game.state) || tr.steps > 120 * 14) return false;
   }
   return undefined;
 }
 function runHint(budgetMs) {
   const job = hint.job;
-  if (!job || job.idx >= job.cands.length) return;
+  if (!job || job.idx >= job.cands.length) return;   // 全段階終了
   const t0 = performance.now();
   const real = snapshotWorld();
   while (performance.now() - t0 < budgetMs && job.idx < job.cands.length) {
@@ -1286,8 +1285,11 @@ function runHint(budgetMs) {
     game.sim = true;
     const r = stepHintTrial(job.trial, 15);   // 細かく区切って 1 フレームの計算時間を守る
     if (r === undefined) { job.trial.snap = snapshotWorld(); continue; }
-    job.markers[job.idx].material = r ? hintMat.ok : hintMat.ng;
-    job.idx++; job.trial = null;
+    if (r) addHintDot(job, job.cands[job.idx]);
+    job.idx++; job.done++; job.trial = null;
+    if (job.idx >= job.cands.length && job.pass < job.passes.length - 1) {   // 次の段階（間を埋める）へ
+      job.pass++; job.cands = job.passes[job.pass]; job.idx = 0; job.prefix = null;
+    }
   }
   restoreWorld(real);
   game.sim = false;
@@ -1310,14 +1312,15 @@ function frame(now) {
     else if (game.state !== 'fixed1') clearHint();
     lastState = game.state; updateUI();
   }
-  if (!game.paused && hint.job) runHint(['idle', 'fixed2'].includes(game.state) ? 14 : 5);
+  if (!game.paused && hint.job) runHint(['idle', 'fixed2'].includes(game.state) ? 22 : 6);
   // ヒントの進み具合と見方を状態表示に添える
-  if (settings.hint && settings.mode === 'fixed' && hint.group.children.length) {
+  if (settings.hint && settings.mode === 'fixed' && (hint.job || hint.group.children.length)) {
     const job = hint.job, base = STATUS[game.state]?.() ?? '';
     const which = game.state === 'fixed2' || (job?.kind === 'z') ? '②' : '①';
-    ui.status.textContent = job && job.idx < job.cands.length
-      ? `${base}（ヒント計算中 ${job.idx}/${job.cands.length}）`
-      : `${base}（緑＝ここで${which}を離すと取れる）`;
+    const running = job && job.idx < job.cands.length;
+    ui.status.textContent = running
+      ? `${base}（ヒント計算中 ${Math.round(job.done / job.total * 100)}%）`
+      : hint.group.children.length ? `${base}（緑の丸＝ここで${which}を離すと取れる）` : `${base}（ヒント: 取れる位置なし）`;
   }
 
   for (const { body, obj } of synced) { obj.position.copy(body.position); obj.quaternion.copy(body.quaternion); }
